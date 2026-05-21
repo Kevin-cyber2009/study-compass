@@ -18,7 +18,7 @@ const pool = process.env.DATABASE_URL
   : null;
 
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 app.use((request, response, next) => {
   const startedAt = Date.now();
@@ -234,6 +234,28 @@ app.post("/api/groups", async (request, response) => {
     response.status(201).json(created);
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot create group." });
+  }
+});
+
+app.post("/api/groups/:id/join", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const groupId = Number(request.params.id);
+  if (!Number.isFinite(groupId)) return response.status(400).json({ error: "Invalid group id." });
+
+  try {
+    const result = await pool.query(
+      `update study_groups
+       set members = members + 1
+       where id = $1
+       returning id`,
+      [groupId]
+    );
+
+    if (!result.rows[0]) return response.status(404).json({ error: "Group not found." });
+    response.json(await getGroup(result.rows[0].id));
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot join group." });
   }
 });
 
@@ -869,7 +891,7 @@ function sanitizePost(post = {}) {
     type: String(post.type || "Minh chứng học tập").slice(0, 80),
     content: String(post.content || "").trim().slice(0, 1200),
     proof: String(post.proof || "").slice(0, 160),
-    image: String(post.image || "").slice(0, 1_500_000),
+    image: String(post.image || "").slice(0, 8_500_000),
     studyMinutes: Number(post.studyMinutes || 0)
   };
 }

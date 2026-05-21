@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createRoot } from "react-dom/client";
 import {
   AlarmClock,
+  Award,
   BarChart3,
   BookOpenCheck,
   CalendarDays,
@@ -16,6 +17,7 @@ import {
   GraduationCap,
   LayoutDashboard,
   Medal,
+  MessageCircle,
   MessageSquarePlus,
   Pause,
   Play,
@@ -25,6 +27,8 @@ import {
   Sparkles,
   Target,
   Trophy,
+  UserPlus,
+  Video,
   UsersRound
 } from "lucide-react";
 import "./styles.css";
@@ -110,6 +114,7 @@ function App() {
     }
   ]));
   const [posts, setPosts] = useState(() => load("posts", seedPosts));
+  const [timelapses, setTimelapses] = useState(() => load("timelapses", []));
   const [studyGroups, setStudyGroups] = useState(() => load("studyGroups", groups));
   const [mistakes, setMistakes] = useState(() => load("mistakes", []));
   const [aiStatus, setAiStatus] = useState("idle");
@@ -163,6 +168,7 @@ function App() {
   useEffect(() => save("aiPlan", aiPlan), [aiPlan]);
   useEffect(() => save("tutorMessages", tutorMessages), [tutorMessages]);
   useEffect(() => save("posts", posts), [posts]);
+  useEffect(() => save("timelapses", timelapses), [timelapses]);
   useEffect(() => save("studyGroups", studyGroups), [studyGroups]);
   useEffect(() => save("mistakes", mistakes), [mistakes]);
 
@@ -527,8 +533,8 @@ function App() {
       setStudySyncStatus("server");
       return "";
     } catch (error) {
-      if (error.status === 409) return "Email nÃ y Ä‘Ã£ cÃ³ tÃ i khoáº£n.";
-      if (error.status === 401) return "Email hoáº·c máº­t kháº©u khÃ´ng Ä‘Ãºng.";
+      if (error.status === 409) return "Email này đã có tài khoản.";
+      if (error.status === 401) return "Email hoặc mật khẩu không đúng.";
       setStudySyncStatus("local");
     }
 
@@ -631,7 +637,28 @@ function App() {
             onOpenUsageSettings={openUsageSettings}
           />
         )}
-        {active === "profile" && <Profile user={authUser} proofs={proofs} setProofs={setProofs} totalStudy={totalStudy} doneCount={doneCount} streak={streak} />}
+        {active === "timelapse" && (
+          <Timelapse
+            user={authUser}
+            clips={timelapses}
+            setClips={setTimelapses}
+            posts={posts}
+            setPosts={setPosts}
+            setActive={navigateTo}
+          />
+        )}
+        {active === "profile" && (
+          <Profile
+            user={authUser}
+            proofs={proofs}
+            totalStudy={totalStudy}
+            doneCount={doneCount}
+            streak={streak}
+            posts={posts}
+            mistakes={mistakes}
+            timelapses={timelapses}
+          />
+        )}
         {active === "social" && (
           <Social
             user={authUser}
@@ -649,6 +676,7 @@ function App() {
         <NavButton icon={Sparkles} label="AI" active={active === "planner"} onClick={() => navigateTo("planner")} />
         <NavButton icon={CalendarDays} label="Lịch" active={active === "schedule"} onClick={() => navigateTo("schedule")} />
         <NavButton icon={Clock3} label="Tập trung" active={active === "focus"} onClick={() => navigateTo("focus")} />
+        <NavButton icon={Video} label="Quay" active={active === "timelapse"} onClick={() => navigateTo("timelapse")} />
         <NavButton icon={Medal} label="Hồ sơ" active={active === "profile"} onClick={() => navigateTo("profile")} />
         <NavButton icon={UsersRound} label="Feed" active={active === "social"} onClick={() => navigateTo("social")} />
       </nav>
@@ -1117,23 +1145,141 @@ function Focus({ minutes, setMinutes, running, setRunning, apps, usageStatus, on
   );
 }
 
-function Profile({ user, proofs, setProofs, totalStudy, doneCount, streak }) {
+function Timelapse({ user, clips, setClips, posts, setPosts, setActive }) {
+  const [draft, setDraft] = useState({
+    title: "Phiên học timelapse",
+    minutes: 45
+  });
+  const [clipError, setClipError] = useState("");
+
+  const saveClip = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 7_500_000) {
+      setClipError("Video hơi nặng. Hãy quay ngắn hơn hoặc nén xuống dưới khoảng 7 MB để app lưu ổn định.");
+      return;
+    }
+
+    const video = await fileToDataUrl(file);
+    const nextClip = {
+      id: Date.now(),
+      title: draft.title.trim() || "Phiên học timelapse",
+      minutes: Number(draft.minutes || 45),
+      video,
+      createdAt: new Date().toLocaleString("vi-VN"),
+      author: user.name
+    };
+
+    setClipError("");
+    setClips([nextClip, ...clips]);
+    event.target.value = "";
+  };
+
+  const publishClip = (clip) => {
+    const nextPost = {
+      id: Date.now(),
+      author: user.name,
+      badge: "Timelapse",
+      type: "Timelapse",
+      content: `${clip.title} - ${clip.minutes} phút học có video ghi lại.`,
+      proof: "Video timelapse",
+      image: clip.video,
+      studyMinutes: clip.minutes,
+      likes: 0,
+      comments: [],
+      liked: false
+    };
+
+    setPosts([nextPost, ...posts]);
+    setActive("social");
+  };
+
+  return (
+    <section className="timelapse-layout">
+      <div className="panel timelapse-recorder">
+        <div className="panel-title">
+          <Video size={20} />
+          <h2>Quay timelapse học</h2>
+        </div>
+        <div className="timelapse-form">
+          <input
+            value={draft.title}
+            onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+            placeholder="Tên phiên học"
+          />
+          <input
+            type="number"
+            min="5"
+            max="240"
+            value={draft.minutes}
+            onChange={(event) => setDraft({ ...draft, minutes: event.target.value })}
+            aria-label="Số phút học"
+          />
+          <label className="image-picker">
+            <Video size={18} />
+            Quay hoặc chọn video timelapse
+            <input type="file" accept="video/*" capture="environment" onChange={saveClip} />
+          </label>
+          {clipError && <p className="inline-error">{clipError}</p>}
+        </div>
+      </div>
+
+      <div className="clip-list">
+        {clips.length === 0 && (
+          <p className="empty-state">Chưa có timelapse nào. Quay một video ngắn khi học rồi đăng lên Feed để tăng uy tín học tập.</p>
+        )}
+        {clips.map((clip) => (
+          <article className="clip-card" key={clip.id}>
+            <video className="post-video" src={clip.video} controls playsInline />
+            <div>
+              <strong>{clip.title}</strong>
+              <p>{clip.createdAt} · {clip.minutes} phút</p>
+            </div>
+            <button className="primary-action" type="button" onClick={() => publishClip(clip)}>
+              <Send size={18} />
+              Đăng lên Feed
+            </button>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes, timelapses }) {
+  const badges = makeProfileBadges({ proofs, totalStudy, doneCount, streak, posts, mistakes, timelapses, user });
+
   return (
     <section className="profile-layout">
       <div className="profile-hero">
         <div>
           <p className="eyebrow">Hồ sơ học tập</p>
           <h2>{user.name}</h2>
-          <p>{user.email} · {streak.title} · ưu tiên học đều và có bằng chứng.</p>
+          <p>{user.email} · {streak.title} · trưng bày huy hiệu để giữ động lực học.</p>
         </div>
-        <button className="primary-action" onClick={() => setProofs(proofs + 1)}>
-          <Camera size={18} />
-          Thêm minh chứng
-        </button>
       </div>
       <Metric icon={Trophy} label="Thành tích" value={`${proofs} minh chứng`} note="Ảnh, timelapse hoặc ghi chú học" />
       <Metric icon={BarChart3} label="Kỷ luật" value={`${doneCount} phiên`} note={`${totalStudy} phút học đã ghi nhận`} />
       <Metric icon={Flame} label="Uy tín" value={streak.title} note={`${streak.days} ngày streak · ${streak.next}`} />
+      <div className="panel badge-showcase">
+        <div className="panel-title">
+          <Award size={20} />
+          <h2>Huy hiệu trưng bày</h2>
+        </div>
+        <div className="badge-grid">
+          {badges.map((badge) => {
+            const Icon = badge.icon;
+            return (
+              <article className={`badge-card ${badge.unlocked ? "unlocked" : ""}`} key={badge.title}>
+                <Icon size={20} />
+                <strong>{badge.title}</strong>
+                <p>{badge.detail}</p>
+              </article>
+            );
+          })}
+        </div>
+      </div>
     </section>
   );
 }
@@ -1144,11 +1290,15 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
     content: "",
     proof: "Ảnh minh chứng",
     studyMinutes: 90,
-    image: ""
+    image: "",
+    mediaType: ""
   });
   const [commentDrafts, setCommentDrafts] = useState({});
   const [groupDraft, setGroupDraft] = useState({ name: "", description: "" });
+  const [joinedGroups, setJoinedGroups] = useState(() => load("joinedGroups", []));
   const [socialError, setSocialError] = useState("");
+
+  useEffect(() => save("joinedGroups", joinedGroups), [joinedGroups]);
 
   const publishPost = async () => {
     const content = draft.content.trim();
@@ -1162,6 +1312,7 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       content,
       proof: draft.proof,
       image: draft.image,
+      mediaType: draft.mediaType,
       studyMinutes: Number(draft.studyMinutes || 0),
       likes: 0,
       comments: [],
@@ -1184,15 +1335,25 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       setPosts([nextPost, ...posts]);
     }
 
-    setDraft({ ...draft, content: "", image: "" });
+    setDraft({ ...draft, content: "", image: "", mediaType: "" });
   };
 
-  const attachImage = (event) => {
+  const attachMedia = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    if (file.size > 7_500_000) {
+      setSocialError("Video hơi nặng. Hãy chọn video dưới khoảng 7 MB hoặc nén trước khi đăng.");
+      event.target.value = "";
+      return;
+    }
+
     const reader = new FileReader();
-    reader.onload = () => setDraft((current) => ({ ...current, image: String(reader.result || "") }));
+    reader.onload = () => setDraft((current) => ({
+      ...current,
+      image: String(reader.result || ""),
+      mediaType: file.type.startsWith("video/") ? "video" : "image"
+    }));
     reader.readAsDataURL(file);
   };
 
@@ -1277,6 +1438,36 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
     setGroupDraft({ name: "", description: "" });
   };
 
+  const joinGroup = async (group) => {
+    const groupKey = String(group.id || group.name);
+    if (joinedGroups.includes(groupKey)) return;
+
+    const applyJoinedGroup = (nextGroup) => {
+      setGroups(groups.map((item) => {
+        const itemKey = String(item.id || item.name);
+        return itemKey === groupKey ? { ...item, ...nextGroup, members: Number(nextGroup.members || item.members + 1) } : item;
+      }));
+      setJoinedGroups([...joinedGroups, groupKey]);
+    };
+
+    setSocialError("");
+
+    if (!group.id) {
+      applyJoinedGroup({ members: Number(group.members || 0) + 1 });
+      return;
+    }
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/groups/${group.id}/join`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Không vào được nhóm.");
+      applyJoinedGroup(data);
+    } catch (error) {
+      setSocialError(error.message || "Đã vào nhóm tạm trên máy.");
+      applyJoinedGroup({ members: Number(group.members || 0) + 1 });
+    }
+  };
+
   return (
     <section className="social-layout">
       <div className="panel composer-panel">
@@ -1316,11 +1507,15 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
             />
           </div>
           <label className="image-picker">
-            <Camera size={18} />
-            {draft.image ? "Đã chọn ảnh minh chứng" : "Gửi ảnh minh chứng"}
-            <input type="file" accept="image/*" onChange={attachImage} />
+            {isVideoMedia(draft.image) ? <Video size={18} /> : <Camera size={18} />}
+            {draft.image ? `Đã chọn ${mediaLabel(draft.image)}` : "Gửi ảnh hoặc video minh chứng"}
+            <input type="file" accept="image/*,video/*" onChange={attachMedia} />
           </label>
-          {draft.image && <img className="image-preview" src={draft.image} alt="Ảnh minh chứng xem trước" />}
+          {draft.image && (
+            isVideoMedia(draft.image)
+              ? <video className="video-preview" src={draft.image} controls playsInline />
+              : <img className="image-preview" src={draft.image} alt="Ảnh minh chứng xem trước" />
+          )}
           <button className="primary-action" type="button" onClick={publishPost}>
             <Send size={18} />
             {draft.type === "Hỏi bài" ? "Đăng câu hỏi" : "Đăng thành tích"}
@@ -1340,9 +1535,13 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
               </div>
             </header>
             <p className="post-content">{post.content}</p>
-            {post.image && <img className="post-image" src={post.image} alt="Minh chứng học tập" />}
+            {post.image && (
+              isVideoMedia(post.image)
+                ? <video className="post-video" src={post.image} controls playsInline />
+                : <img className="post-image" src={post.image} alt="Minh chứng học tập" />
+            )}
             <div className={`proof-card ${post.type === "Hỏi bài" ? "question" : ""}`}>
-              {post.type === "Hỏi bài" ? <HelpCircle size={22} /> : <Trophy size={22} />}
+              {post.type === "Hỏi bài" ? <HelpCircle size={22} /> : isVideoMedia(post.image) ? <Video size={22} /> : <Trophy size={22} />}
               <div>
                 <strong>{post.proof}</strong>
                 <p>{post.type === "Hỏi bài" ? "Đang chờ cộng đồng hỗ trợ" : `${Math.round(post.studyMinutes / 60 * 10) / 10} giờ học được ghi nhận`}</p>
@@ -1409,13 +1608,96 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
                 <p>{group.members} thành viên · chuỗi {group.streak} ngày</p>
                 {group.description && <p>{group.description}</p>}
               </div>
-              <span>#{group.rank}</span>
+              <div className="group-actions">
+                <span>#{group.rank}</span>
+                <button type="button" onClick={() => joinGroup(group)} disabled={joinedGroups.includes(String(group.id || group.name))}>
+                  <UserPlus size={16} />
+                  {joinedGroups.includes(String(group.id || group.name)) ? "Đã vào" : "Vào"}
+                </button>
+              </div>
             </article>
           ))}
         </div>
       </div>
     </section>
   );
+}
+
+function makeProfileBadges({ proofs, totalStudy, doneCount, streak, posts, mistakes, timelapses, user }) {
+  const commentCount = posts.reduce((sum, post) => {
+    const comments = Array.isArray(post.comments) ? post.comments : [];
+    return sum + comments.filter((comment) => comment.author === user.name).length;
+  }, 0);
+  const helpCount = posts.filter((post) => post.author === user.name && post.type === "Hỏi bài").length + commentCount;
+  const studyHours = Math.round(totalStudy / 60);
+
+  return [
+    {
+      icon: Flame,
+      title: "Giữ chuỗi",
+      detail: `${streak.days} ngày học liên tục`,
+      unlocked: streak.days >= 3
+    },
+    {
+      icon: Clock3,
+      title: "Giờ học thật",
+      detail: `${studyHours} giờ đã ghi nhận`,
+      unlocked: totalStudy >= 180
+    },
+    {
+      icon: MessageCircle,
+      title: "Người góp ý",
+      detail: `${commentCount} bình luận hỗ trợ bạn học`,
+      unlocked: commentCount > 0
+    },
+    {
+      icon: HelpCircle,
+      title: "Giải bài cộng đồng",
+      detail: `${helpCount} lần hỏi/giúp bài`,
+      unlocked: helpCount > 0
+    },
+    {
+      icon: BookOpenCheck,
+      title: "Sửa lỗi sai",
+      detail: `${mistakes.length} lỗi sai đã phân tích`,
+      unlocked: mistakes.length > 0
+    },
+    {
+      icon: Video,
+      title: "Timelapse học",
+      detail: `${timelapses.length} video học tập`,
+      unlocked: timelapses.length > 0
+    },
+    {
+      icon: Trophy,
+      title: "Minh chứng",
+      detail: `${proofs} minh chứng tích lũy`,
+      unlocked: proofs > 0
+    },
+    {
+      icon: Award,
+      title: "Hoàn thành phiên",
+      detail: `${doneCount} phiên đã hoàn thành`,
+      unlocked: doneCount > 0
+    }
+  ];
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("Không đọc được file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function isVideoMedia(value = "") {
+  return String(value).startsWith("data:video/");
+}
+
+function mediaLabel(value = "") {
+  return isVideoMedia(value) ? "video minh chứng" : "ảnh minh chứng";
 }
 
 function Metric({ icon: Icon, label, value, note }) {
@@ -1478,6 +1760,7 @@ function screenTitle(active) {
     planner: "AI lập lộ trình",
     schedule: "Lịch học cá nhân",
     focus: "Phiên tập trung",
+    timelapse: "Timelapse học tập",
     profile: "Hồ sơ thành tích",
     social: "Xã hội học tập"
   };
@@ -1527,7 +1810,11 @@ function load(key, fallback) {
 }
 
 function save(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    console.warn(`Cannot save ${key} to localStorage. The payload may be too large.`);
+  }
 }
 
 function formatUsageMinutes(value) {
