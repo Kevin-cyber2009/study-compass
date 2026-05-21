@@ -9,6 +9,10 @@ const app = express();
 const port = Number(process.env.PORT || process.env.API_PORT || 8787);
 const host = process.env.API_HOST || "0.0.0.0";
 const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const geminiModels = getGeminiModels(
+  model,
+  process.env.GEMINI_FALLBACK_MODELS || "gemini-2.0-flash"
+);
 const pool = process.env.DATABASE_URL
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL })
   : null;
@@ -16,12 +20,25 @@ const pool = process.env.DATABASE_URL
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
+app.use((request, response, next) => {
+  const startedAt = Date.now();
+
+  response.on("finish", () => {
+    console.log(
+      `${request.method} ${request.originalUrl} -> ${response.statusCode} ${Date.now() - startedAt}ms`
+    );
+  });
+
+  next();
+});
+
 app.get("/api/health", async (_request, response) => {
   const database = await getDatabaseHealth();
 
   response.json({
     ok: true,
-    model,
+    model: geminiModels[0],
+    fallbackModels: geminiModels.slice(1),
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
     database,
     lanUrls: getLanUrls(port)
@@ -232,41 +249,22 @@ app.post("/api/study-plan", async (request, response) => {
   const goal = sanitizeGoal(request.body?.goal);
 
   try {
-    const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: buildStudyPrompt(goal) }]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.45,
-            responseMimeType: "application/json"
-          }
-        })
+    const { data, usedModel } = await generateGeminiContent({
+      apiKey,
+      prompt: buildStudyPrompt(goal),
+      generationConfig: {
+        temperature: 0.45,
+        responseMimeType: "application/json"
       }
-    );
-
-    const data = await geminiResponse.json();
-
-    if (!geminiResponse.ok) {
-      return response.status(geminiResponse.status).json({
-        error: data?.error?.message || "Gemini request failed."
-      });
-    }
+    });
 
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     const parsed = parsePlan(text);
     await saveAiEvent("study-plan", goal, parsed);
 
-    response.json(parsed);
+    response.json({ ...parsed, model: usedModel });
   } catch (error) {
-    response.status(500).json({ error: error.message || "Unexpected Gemini error." });
+    response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
 
@@ -282,41 +280,22 @@ app.post("/api/mistake-analysis", async (request, response) => {
   const mistake = sanitizeMistake(request.body?.mistake);
 
   try {
-    const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: buildMistakePrompt(mistake) }]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.35,
-            responseMimeType: "application/json"
-          }
-        })
+    const { data, usedModel } = await generateGeminiContent({
+      apiKey,
+      prompt: buildMistakePrompt(mistake),
+      generationConfig: {
+        temperature: 0.35,
+        responseMimeType: "application/json"
       }
-    );
-
-    const data = await geminiResponse.json();
-
-    if (!geminiResponse.ok) {
-      return response.status(geminiResponse.status).json({
-        error: data?.error?.message || "Gemini request failed."
-      });
-    }
+    });
 
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     const parsed = parseMistakeAnalysis(text);
     await saveAiEvent("mistake-analysis", mistake, parsed);
 
-    response.json(parsed);
+    response.json({ ...parsed, model: usedModel });
   } catch (error) {
-    response.status(500).json({ error: error.message || "Unexpected Gemini error." });
+    response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
 
@@ -332,41 +311,22 @@ app.post("/api/tutor-chat", async (request, response) => {
   const tutorRequest = sanitizeTutorRequest(request.body);
 
   try {
-    const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: buildTutorPrompt(tutorRequest) }]
-            }
-          ],
-          generationConfig: {
-            temperature: 0.55,
-            responseMimeType: "application/json"
-          }
-        })
+    const { data, usedModel } = await generateGeminiContent({
+      apiKey,
+      prompt: buildTutorPrompt(tutorRequest),
+      generationConfig: {
+        temperature: 0.55,
+        responseMimeType: "application/json"
       }
-    );
-
-    const data = await geminiResponse.json();
-
-    if (!geminiResponse.ok) {
-      return response.status(geminiResponse.status).json({
-        error: data?.error?.message || "Gemini request failed."
-      });
-    }
+    });
 
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     const parsed = parseTutorAnswer(text);
     await saveAiEvent("tutor-chat", tutorRequest, parsed);
 
-    response.json(parsed);
+    response.json({ ...parsed, model: usedModel });
   } catch (error) {
-    response.status(500).json({ error: error.message || "Unexpected Gemini error." });
+    response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
 
@@ -389,6 +349,81 @@ function getLanUrls(port) {
     .flat()
     .filter((item) => item?.family === "IPv4" && !item.internal)
     .map((item) => `http://${item.address}:${port}`);
+}
+
+function getGeminiModels(primary, fallbacks) {
+  return [primary, ...String(fallbacks || "").split(",")]
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item, index, models) => models.indexOf(item) === index);
+}
+
+async function generateGeminiContent({ apiKey, prompt, generationConfig }) {
+  let lastError = null;
+
+  for (const currentModel of geminiModels) {
+    const geminiResponse = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: prompt }]
+            }
+          ],
+          generationConfig
+        })
+      }
+    );
+
+    const data = await readJson(geminiResponse);
+
+    if (geminiResponse.ok) {
+      return { data, usedModel: currentModel };
+    }
+
+    const message = data?.error?.message || "Gemini request failed.";
+    lastError = createGeminiError(geminiResponse.status, message, currentModel);
+    console.warn(`Gemini ${currentModel} failed: ${geminiResponse.status} ${message}`);
+
+    if (!canTryNextGeminiModel(geminiResponse.status, message)) {
+      break;
+    }
+  }
+
+  throw lastError || createGeminiError(500, "Gemini request failed.", geminiModels[0]);
+}
+
+async function readJson(response) {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
+}
+
+function createGeminiError(status, message, currentModel) {
+  const error = new Error(message);
+  error.status = status;
+  error.model = currentModel;
+  return error;
+}
+
+function canTryNextGeminiModel(status, message) {
+  return [429, 500, 502, 503, 504].includes(status) || /high demand|overloaded|try again/i.test(message);
+}
+
+function toClientGeminiError(error) {
+  const message = error?.message || "Unexpected Gemini error.";
+
+  if (/high demand|overloaded|try again/i.test(message)) {
+    return `Gemini dang qua tai tam thoi. Server da thu cac model: ${geminiModels.join(", ")}. Bam lai sau 1-2 phut.`;
+  }
+
+  return message;
 }
 
 async function initDatabase() {

@@ -10,3 +10,4 @@ android/build
 android/app/build
 android/capacitor-cordova-android-plugins/build
 node_modules/@capacitor/android/capacitor/build
+*.apk
