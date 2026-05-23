@@ -861,8 +861,18 @@ h2 {
   padding: 0 10px;
   color: #17211d;
   background: #eaf3dd;
-  font-size: 0.78rem;
+  font-size: 0;
   font-weight: 900;
+}
+
+.group-actions button::after {
+  content: attr(data-label);
+  font-size: 0.78rem;
+}
+
+.group-actions button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .group-actions button:disabled {
@@ -1083,6 +1093,26 @@ h2 {
 .group-composer textarea {
   min-height: 78px;
   resize: vertical;
+}
+
+.group-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0 10px;
+}
+
+.group-tabs button {
+  min-height: 40px;
+  border-radius: 8px;
+  color: #66736e;
+  background: #eef2e9;
+  font-weight: 900;
+}
+
+.group-tabs button.active {
+  color: #17211d;
+  background: #eaf3dd;
 }
 
 .group-list.compact {

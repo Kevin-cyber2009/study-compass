@@ -8,13 +8,49 @@ Create a local `.env` file from `.env.example`:
 
 ```env
 GEMINI_API_KEY=your_new_gemini_key
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-2.5-flash-lite
+MOCK_AI=false
+AI_REQUEST_SECRET=
+AI_RATE_LIMIT_MAX=20
+AI_RATE_LIMIT_WINDOW_MS=60000
 API_PORT=8787
 API_HOST=0.0.0.0
 VITE_API_BASE_URL=http://localhost:8787
+VITE_AI_REQUEST_SECRET=
 ```
 
 Do not put a real key in `.env.example`, GitHub, screenshots, or app source code.
+
+## Test AI screens without spending Gemini quota
+
+For UI testing, run the backend in mock mode:
+
+```env
+MOCK_AI=true
+VITE_API_BASE_URL=http://localhost:8787
+```
+
+Then start the app with `npm start`. The AI planner, tutor chat, and mistake analysis endpoints will return deterministic mock responses instead of calling Gemini. Set `MOCK_AI=false` again when you want to test the real Gemini API.
+
+If you test through Render, set the same `MOCK_AI=true` environment variable in the Render Web Service and redeploy. Otherwise the app will keep calling the real Gemini key on Render.
+
+## Protect the public AI endpoint during testing
+
+The Android/web app should never contain `GEMINI_API_KEY`. The backend owns that key, but the backend URL is still public, so protect it while testing:
+
+```env
+AI_REQUEST_SECRET=make-a-long-random-test-string
+AI_RATE_LIMIT_MAX=20
+AI_RATE_LIMIT_WINDOW_MS=60000
+```
+
+Then rebuild the app with the matching non-Gemini test header:
+
+```env
+VITE_AI_REQUEST_SECRET=make-a-long-random-test-string
+```
+
+This header is only a test gate because anything in `VITE_*` is bundled into the app. For production, use real account sessions/tokens and per-user AI quotas.
 
 ## Run locally
 

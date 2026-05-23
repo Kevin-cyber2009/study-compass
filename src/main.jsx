@@ -91,6 +91,7 @@ const seedPosts = [
 ];
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
+const aiRequestSecret = import.meta.env.VITE_AI_REQUEST_SECRET || "";
 function App() {
   const [active, setActive] = useState("dashboard");
   const [tabHistory, setTabHistory] = useState(["dashboard"]);
@@ -369,12 +370,16 @@ function App() {
 
     const loadSocial = async () => {
       try {
-        const response = await fetch(`${apiBaseUrl}/api/social`, { cache: "no-store" });
+        const userQuery = serverUserId ? `?userId=${encodeURIComponent(serverUserId)}` : "";
+        const response = await fetch(`${apiBaseUrl}/api/social${userQuery}`, { cache: "no-store" });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Khong tai duoc du lieu cong dong.");
         if (cancelled) return;
 
-        setPosts(data.posts || seedPosts);
+        const syncedPosts = await syncLocalOnlyPosts(data.posts || seedPosts, authUser);
+        if (cancelled) return;
+
+        setPosts(syncedPosts);
         setStudyGroups(data.groups || groups);
         setSocialStatus("server");
       } catch {
@@ -402,7 +407,7 @@ function App() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/study-plan`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: aiHeaders(),
         body: JSON.stringify({ goal })
       });
       const data = await response.json();
@@ -447,7 +452,7 @@ function App() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/tutor-chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: aiHeaders(),
         body: JSON.stringify({
           goal,
           question: cleanQuestion,
@@ -475,7 +480,7 @@ function App() {
     try {
       const response = await fetch(`${apiBaseUrl}/api/mistake-analysis`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: aiHeaders(),
         body: JSON.stringify({ mistake })
       });
       const data = await response.json();
@@ -1295,10 +1300,15 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
   });
   const [commentDrafts, setCommentDrafts] = useState({});
   const [groupDraft, setGroupDraft] = useState({ name: "", description: "" });
-  const [joinedGroups, setJoinedGroups] = useState(() => load("joinedGroups", []));
+  const [groupView, setGroupView] = useState("mine");
   const [socialError, setSocialError] = useState("");
-
-  useEffect(() => save("joinedGroups", joinedGroups), [joinedGroups]);
+  const serverUserId = user?.source === "server" ? user.id : null;
+  const myGroups = groups.filter((group) => group.joined);
+  const discoverGroups = groups.filter((group) => !group.joined);
+  const visibleGroups = groupView === "mine" ? myGroups : discoverGroups;
+  const joinedGroups = {
+    includes: (groupKey) => groups.some((group) => String(group.id || group.name) === groupKey && group.joined)
+  };
 
   const publishPost = async () => {
     const content = draft.content.trim();
@@ -1316,7 +1326,8 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       studyMinutes: Number(draft.studyMinutes || 0),
       likes: 0,
       comments: [],
-      liked: false
+      liked: false,
+      localOnly: false
     };
 
     setSocialError("");
@@ -1325,14 +1336,14 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       const response = await fetch(`${apiBaseUrl}/api/posts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ post: nextPost })
+        body: JSON.stringify({ post: nextPost, userId: serverUserId })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Không đăng được bài.");
       setPosts([data, ...posts]);
     } catch (error) {
       setSocialError(error.message || "Đang lưu tạm trên máy vì chưa kết nối server.");
-      setPosts([nextPost, ...posts]);
+      setPosts([{ ...nextPost, badge: "Chưa đồng bộ", localOnly: true }, ...posts]);
     }
 
     setDraft({ ...draft, content: "", image: "", mediaType: "" });
@@ -1425,14 +1436,16 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       const response = await fetch(`${apiBaseUrl}/api/groups`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ group: nextGroup })
+        body: JSON.stringify({ group: nextGroup, userId: serverUserId })
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Không tạo được nhóm.");
-      setGroups([data, ...groups]);
+      setGroups([{ ...data, joined: true }, ...groups]);
+      setGroupView("mine");
     } catch (error) {
       setSocialError(error.message || "Nhóm đang lưu tạm trên máy.");
-      setGroups([nextGroup, ...groups]);
+      setGroups([{ ...nextGroup, joined: true }, ...groups]);
+      setGroupView("mine");
     }
 
     setGroupDraft({ name: "", description: "" });
@@ -1440,31 +1453,69 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
 
   const joinGroup = async (group) => {
     const groupKey = String(group.id || group.name);
-    if (joinedGroups.includes(groupKey)) return;
+    if (group.joined) return;
 
     const applyJoinedGroup = (nextGroup) => {
       setGroups(groups.map((item) => {
         const itemKey = String(item.id || item.name);
-        return itemKey === groupKey ? { ...item, ...nextGroup, members: Number(nextGroup.members || item.members + 1) } : item;
+        return itemKey === groupKey ? { ...item, ...nextGroup, joined: true, members: Number(nextGroup.members || item.members + 1) } : item;
       }));
-      setJoinedGroups([...joinedGroups, groupKey]);
+      setGroupView("mine");
     };
 
     setSocialError("");
 
-    if (!group.id) {
+    if (!group.id || !serverUserId) {
       applyJoinedGroup({ members: Number(group.members || 0) + 1 });
       return;
     }
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/groups/${group.id}/join`, { method: "POST" });
+      const response = await fetch(`${apiBaseUrl}/api/groups/${group.id}/join`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: serverUserId, memberName: user.name })
+      });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Không vào được nhóm.");
       applyJoinedGroup(data);
     } catch (error) {
       setSocialError(error.message || "Đã vào nhóm tạm trên máy.");
       applyJoinedGroup({ members: Number(group.members || 0) + 1 });
+    }
+  };
+
+  const leaveGroup = async (group) => {
+    const groupKey = String(group.id || group.name);
+
+    const applyLeftGroup = (nextGroup) => {
+      setGroups(groups.map((item) => {
+        const itemKey = String(item.id || item.name);
+        return itemKey === groupKey
+          ? { ...item, ...nextGroup, joined: false, members: Number(nextGroup.members ?? Math.max(0, item.members - 1)) }
+          : item;
+      }));
+    };
+
+    setSocialError("");
+
+    if (!group.id || !serverUserId) {
+      applyLeftGroup({ members: Math.max(0, Number(group.members || 0) - 1) });
+      return;
+    }
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/groups/${group.id}/join`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: serverUserId })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Không rời được nhóm.");
+      applyLeftGroup(data);
+    } catch (error) {
+      setSocialError(error.message || "Đã rời nhóm tạm trên máy.");
+      applyLeftGroup({ members: Math.max(0, Number(group.members || 0) - 1) });
     }
   };
 
@@ -1600,8 +1651,21 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
             Tạo nhóm
           </button>
         </div>
+        <div className="group-tabs">
+          <button className={groupView === "mine" ? "active" : ""} type="button" onClick={() => setGroupView("mine")}>
+            Nhóm của tôi ({myGroups.length})
+          </button>
+          <button className={groupView === "discover" ? "active" : ""} type="button" onClick={() => setGroupView("discover")}>
+            Khám phá ({discoverGroups.length})
+          </button>
+        </div>
+        {visibleGroups.length === 0 && (
+          <p className="empty-state">
+            {groupView === "mine" ? "Bạn chưa vào nhóm nào. Chuyển sang Khám phá để tham gia nhóm học." : "Không còn nhóm mới để tham gia."}
+          </p>
+        )}
         <div className="group-list compact">
-          {groups.map((group) => (
+          {visibleGroups.map((group) => (
             <article className="group-row" key={group.id || group.name}>
               <div>
                 <strong>{group.name}</strong>
@@ -1610,7 +1674,7 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
               </div>
               <div className="group-actions">
                 <span>#{group.rank}</span>
-                <button type="button" onClick={() => joinGroup(group)} disabled={joinedGroups.includes(String(group.id || group.name))}>
+                <button type="button" data-label={group.joined ? "Rời" : "Vào"} onClick={() => group.joined ? leaveGroup(group) : joinGroup(group)}>
                   <UserPlus size={16} />
                   {joinedGroups.includes(String(group.id || group.name)) ? "Đã vào" : "Vào"}
                 </button>
@@ -1681,6 +1745,45 @@ function makeProfileBadges({ proofs, totalStudy, doneCount, streak, posts, mista
       unlocked: doneCount > 0
     }
   ];
+}
+
+async function syncLocalOnlyPosts(serverPosts, user) {
+  const savedPosts = load("posts", []);
+  const serverUserId = user?.source === "server" ? user.id : null;
+  const pendingPosts = savedPosts
+    .filter((post) => (post.localOnly || Number(post.id) > 1_000_000_000_000) && post.author === user?.name)
+    .filter((post) => !hasEquivalentPost(serverPosts, post));
+
+  if (!pendingPosts.length || !apiBaseUrl || !serverUserId) {
+    return [...pendingPosts, ...serverPosts];
+  }
+
+  const synced = [...serverPosts];
+  const stillLocal = [];
+
+  for (const post of pendingPosts.slice(0, 5)) {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/posts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ post, userId: serverUserId })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Cannot sync local post.");
+      if (!hasEquivalentPost(synced, data)) synced.unshift(data);
+    } catch {
+      stillLocal.push(post);
+    }
+  }
+
+  return [...stillLocal, ...synced];
+}
+
+function hasEquivalentPost(posts, target) {
+  return posts.some((post) => (
+    post.id === target.id ||
+    (post.author === target.author && post.content === target.content && post.proof === target.proof)
+  ));
 }
 
 function fileToDataUrl(file) {
@@ -1861,6 +1964,13 @@ async function apiRequest(path, options = {}) {
   }
 
   return data;
+}
+
+function aiHeaders() {
+  return {
+    "Content-Type": "application/json",
+    ...(aiRequestSecret ? { "x-study-compass-key": aiRequestSecret } : {})
+  };
 }
 
 function withoutPassword(user) {

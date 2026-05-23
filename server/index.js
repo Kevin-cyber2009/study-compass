@@ -8,15 +8,21 @@ import pg from "pg";
 const app = express();
 const port = Number(process.env.PORT || process.env.API_PORT || 8787);
 const host = process.env.API_HOST || "0.0.0.0";
-const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const model = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 const geminiModels = getGeminiModels(
   model,
   process.env.GEMINI_FALLBACK_MODELS || "gemini-2.0-flash"
 );
+const mockAi = isTruthyEnv(process.env.MOCK_AI);
+const aiRequestSecret = String(process.env.AI_REQUEST_SECRET || "").trim();
+const aiRateLimitWindowMs = Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60_000);
+const aiRateLimitMax = Number(process.env.AI_RATE_LIMIT_MAX || 20);
+const aiRateLimitBuckets = new Map();
 const pool = process.env.DATABASE_URL
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL })
   : null;
 
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
 
@@ -39,6 +45,7 @@ app.get("/api/health", async (_request, response) => {
     ok: true,
     model: geminiModels[0],
     fallbackModels: geminiModels.slice(1),
+    mockAi,
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
     database,
     lanUrls: getLanUrls(port)
@@ -165,11 +172,16 @@ app.put("/api/users/:userId/profile", async (request, response) => {
   }
 });
 
-app.get("/api/social", async (_request, response) => {
+app.get("/api/social", async (request, response) => {
   if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
 
+  const userId = Number(request.query.userId || 0);
+
   try {
-    const [posts, groups] = await Promise.all([listPosts(), listGroups()]);
+    const [posts, groups] = await Promise.all([
+      listPosts(),
+      listGroups(Number.isFinite(userId) && userId > 0 ? userId : null)
+    ]);
     response.json({ posts, groups });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot load social data." });
@@ -180,13 +192,15 @@ app.post("/api/posts", async (request, response) => {
   if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
 
   const post = sanitizePost(request.body?.post);
+  const userId = Number(request.body?.userId || 0);
+  const safeUserId = Number.isFinite(userId) && userId > 0 ? userId : null;
 
   try {
     const result = await pool.query(
-      `insert into social_posts (author, type, content, proof, image, study_minutes, likes)
-       values ($1, $2, $3, $4, $5, $6, 0)
+      `insert into social_posts (user_id, author, type, content, proof, image, study_minutes, likes)
+       values ($1, $2, $3, $4, $5, $6, $7, 0)
        returning id`,
-      [post.author, post.type, post.content, post.proof, post.image, post.studyMinutes]
+      [safeUserId, post.author, post.type, post.content, post.proof, post.image, post.studyMinutes]
     );
     const created = await getPost(result.rows[0].id);
     response.status(201).json(created);
@@ -222,16 +236,21 @@ app.post("/api/groups", async (request, response) => {
   if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
 
   const group = sanitizeGroup(request.body?.group);
+  const userId = Number(request.body?.userId || 0);
+  const safeUserId = Number.isFinite(userId) && userId > 0 ? userId : null;
 
   try {
     const result = await pool.query(
       `insert into study_groups (name, description, owner_name, members, streak, rank)
-       values ($1, $2, $3, 1, 1, 99)
+       values ($1, $2, $3, 0, 1, 99)
        returning id`,
       [group.name, group.description, group.ownerName]
     );
+    if (safeUserId) {
+      await joinGroupMember(result.rows[0].id, safeUserId, group.ownerName);
+    }
     const created = await getGroup(result.rows[0].id);
-    response.status(201).json(created);
+    response.status(201).json({ ...created, joined: Boolean(safeUserId) });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot create group." });
   }
@@ -243,23 +262,61 @@ app.post("/api/groups/:id/join", async (request, response) => {
   const groupId = Number(request.params.id);
   if (!Number.isFinite(groupId)) return response.status(400).json({ error: "Invalid group id." });
 
-  try {
-    const result = await pool.query(
-      `update study_groups
-       set members = members + 1
-       where id = $1
-       returning id`,
-      [groupId]
-    );
+  const userId = Number(request.body?.userId || 0);
+  const memberName = String(request.body?.memberName || "Hoc sinh").slice(0, 80);
+  if (!Number.isFinite(userId) || userId <= 0) return response.status(400).json({ error: "User id is required." });
 
-    if (!result.rows[0]) return response.status(404).json({ error: "Group not found." });
-    response.json(await getGroup(result.rows[0].id));
+  try {
+    const joined = await joinGroupMember(groupId, userId, memberName);
+    if (!joined) return response.status(404).json({ error: "Group not found." });
+    response.json({ ...(await getGroup(groupId)), joined: true });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot join group." });
   }
 });
 
+app.delete("/api/groups/:id/join", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const groupId = Number(request.params.id);
+  const userId = Number(request.body?.userId || 0);
+
+  if (!Number.isFinite(groupId)) return response.status(400).json({ error: "Invalid group id." });
+  if (!Number.isFinite(userId) || userId <= 0) return response.status(400).json({ error: "User id is required." });
+
+  try {
+    const result = await pool.query(
+      `delete from group_members
+       where group_id = $1 and user_id = $2`,
+      [groupId, userId]
+    );
+
+    if (result.rowCount > 0) {
+      await pool.query(
+        `update study_groups
+         set members = greatest(0, members - 1)
+         where id = $1`,
+        [groupId]
+      );
+    }
+
+    response.json({ ...(await getGroup(groupId)), joined: false });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot leave group." });
+  }
+});
+
 app.post("/api/study-plan", async (request, response) => {
+  const goal = sanitizeGoal(request.body?.goal);
+  const blocked = guardAiRequest(request, response);
+  if (blocked) return;
+
+  if (mockAi) {
+    const parsed = mockStudyPlan(goal);
+    await saveAiEvent("study-plan:mock", goal, parsed);
+    return response.json({ ...parsed, model: "mock" });
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -268,14 +325,13 @@ app.post("/api/study-plan", async (request, response) => {
     });
   }
 
-  const goal = sanitizeGoal(request.body?.goal);
-
   try {
     const { data, usedModel } = await generateGeminiContent({
       apiKey,
       prompt: buildStudyPrompt(goal),
       generationConfig: {
         temperature: 0.45,
+        maxOutputTokens: 900,
         responseMimeType: "application/json"
       }
     });
@@ -286,11 +342,27 @@ app.post("/api/study-plan", async (request, response) => {
 
     response.json({ ...parsed, model: usedModel });
   } catch (error) {
+    if (shouldFallbackFromGeminiError(error)) {
+      const parsed = withFallbackWarning(mockStudyPlan(goal), toClientGeminiError(error));
+      await saveAiEvent("study-plan:fallback", goal, parsed);
+      return response.json({ ...parsed, model: "fallback" });
+    }
+
     response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
 
 app.post("/api/mistake-analysis", async (request, response) => {
+  const mistake = sanitizeMistake(request.body?.mistake);
+  const blocked = guardAiRequest(request, response);
+  if (blocked) return;
+
+  if (mockAi) {
+    const parsed = mockMistakeAnalysis(mistake);
+    await saveAiEvent("mistake-analysis:mock", mistake, parsed);
+    return response.json({ ...parsed, model: "mock" });
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -299,14 +371,13 @@ app.post("/api/mistake-analysis", async (request, response) => {
     });
   }
 
-  const mistake = sanitizeMistake(request.body?.mistake);
-
   try {
     const { data, usedModel } = await generateGeminiContent({
       apiKey,
       prompt: buildMistakePrompt(mistake),
       generationConfig: {
         temperature: 0.35,
+        maxOutputTokens: 700,
         responseMimeType: "application/json"
       }
     });
@@ -317,11 +388,27 @@ app.post("/api/mistake-analysis", async (request, response) => {
 
     response.json({ ...parsed, model: usedModel });
   } catch (error) {
+    if (shouldFallbackFromGeminiError(error)) {
+      const parsed = withFallbackWarning(mockMistakeAnalysis(mistake), toClientGeminiError(error));
+      await saveAiEvent("mistake-analysis:fallback", mistake, parsed);
+      return response.json({ ...parsed, model: "fallback" });
+    }
+
     response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
 
 app.post("/api/tutor-chat", async (request, response) => {
+  const tutorRequest = sanitizeTutorRequest(request.body);
+  const blocked = guardAiRequest(request, response);
+  if (blocked) return;
+
+  if (mockAi) {
+    const parsed = mockTutorAnswer(tutorRequest);
+    await saveAiEvent("tutor-chat:mock", tutorRequest, parsed);
+    return response.json({ ...parsed, model: "mock" });
+  }
+
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
@@ -330,14 +417,13 @@ app.post("/api/tutor-chat", async (request, response) => {
     });
   }
 
-  const tutorRequest = sanitizeTutorRequest(request.body);
-
   try {
     const { data, usedModel } = await generateGeminiContent({
       apiKey,
       prompt: buildTutorPrompt(tutorRequest),
       generationConfig: {
         temperature: 0.55,
+        maxOutputTokens: 900,
         responseMimeType: "application/json"
       }
     });
@@ -348,6 +434,12 @@ app.post("/api/tutor-chat", async (request, response) => {
 
     response.json({ ...parsed, model: usedModel });
   } catch (error) {
+    if (shouldFallbackFromGeminiError(error)) {
+      const parsed = withFallbackWarning(mockTutorAnswer(tutorRequest), toClientGeminiError(error));
+      await saveAiEvent("tutor-chat:fallback", tutorRequest, parsed);
+      return response.json({ ...parsed, model: "fallback" });
+    }
+
     response.status(error.status || 500).json({ error: toClientGeminiError(error) });
   }
 });
@@ -378,6 +470,50 @@ function getGeminiModels(primary, fallbacks) {
     .map((item) => item.trim())
     .filter(Boolean)
     .filter((item, index, models) => models.indexOf(item) === index);
+}
+
+function isTruthyEnv(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+}
+
+function guardAiRequest(request, response) {
+  if (aiRequestSecret && request.get("x-study-compass-key") !== aiRequestSecret) {
+    response.status(401).json({ error: "AI endpoint is locked for this deployment." });
+    return true;
+  }
+
+  const now = Date.now();
+  const key = request.ip || request.get("x-forwarded-for") || "unknown";
+  const bucket = aiRateLimitBuckets.get(key) || { count: 0, resetAt: now + aiRateLimitWindowMs };
+
+  if (now > bucket.resetAt) {
+    bucket.count = 0;
+    bucket.resetAt = now + aiRateLimitWindowMs;
+  }
+
+  bucket.count += 1;
+  aiRateLimitBuckets.set(key, bucket);
+  pruneAiRateLimitBuckets(now);
+
+  if (bucket.count > aiRateLimitMax) {
+    response.status(429).json({
+      error: "AI test limit reached. Wait a little before asking again.",
+      retryAfterMs: Math.max(0, bucket.resetAt - now)
+    });
+    return true;
+  }
+
+  return false;
+}
+
+function pruneAiRateLimitBuckets(now) {
+  if (aiRateLimitBuckets.size < 500) return;
+
+  for (const [key, bucket] of aiRateLimitBuckets.entries()) {
+    if (now > bucket.resetAt) {
+      aiRateLimitBuckets.delete(key);
+    }
+  }
 }
 
 async function generateGeminiContent({ apiKey, prompt, generationConfig }) {
@@ -435,17 +571,30 @@ function createGeminiError(status, message, currentModel) {
 }
 
 function canTryNextGeminiModel(status, message) {
-  return [429, 500, 502, 503, 504].includes(status) || /high demand|overloaded|try again/i.test(message);
+  if (/quota|exceeded|rate limit/i.test(message)) {
+    return false;
+  }
+
+  return [500, 502, 503, 504].includes(status) || (status === 429 && /high demand|overloaded/i.test(message));
 }
 
 function toClientGeminiError(error) {
   const message = error?.message || "Unexpected Gemini error.";
+
+  if (/quota|exceeded|rate limit/i.test(message)) {
+    return "Gemini API key da het quota hoac bi gioi han tam thoi. Hay doi GEMINI_API_KEY tren Render Environment roi redeploy.";
+  }
 
   if (/high demand|overloaded|try again/i.test(message)) {
     return `Gemini dang qua tai tam thoi. Server da thu cac model: ${geminiModels.join(", ")}. Bam lai sau 1-2 phut.`;
   }
 
   return message;
+}
+
+function shouldFallbackFromGeminiError(error) {
+  const message = error?.message || "";
+  return /quota|exceeded|rate limit|high demand|overloaded|try again/i.test(message);
 }
 
 async function initDatabase() {
@@ -538,6 +687,14 @@ async function initDatabase() {
       streak integer not null default 1,
       rank integer not null default 99,
       created_at timestamptz not null default now()
+    );
+
+    create table if not exists group_members (
+      group_id bigint not null references study_groups(id) on delete cascade,
+      user_id bigint not null references app_users(id) on delete cascade,
+      member_name text not null,
+      joined_at timestamptz not null default now(),
+      primary key (group_id, user_id)
     );
   `);
 
@@ -740,12 +897,46 @@ async function getPost(id) {
   return normalizePost(posts.rows[0]);
 }
 
-async function listGroups() {
+async function joinGroupMember(groupId, userId, memberName) {
+  const exists = await pool.query("select id from study_groups where id = $1", [groupId]);
+  if (!exists.rows[0]) return false;
+
+  const inserted = await pool.query(
+    `insert into group_members (group_id, user_id, member_name)
+     values ($1, $2, $3)
+     on conflict (group_id, user_id) do nothing`,
+    [groupId, userId, memberName]
+  );
+
+  if (inserted.rowCount > 0) {
+    await pool.query(
+      `update study_groups
+       set members = members + 1
+       where id = $1`,
+      [groupId]
+    );
+  }
+
+  return true;
+}
+
+async function listGroups(userId = null) {
   const result = await pool.query(
-    `select id, name, description, owner_name, members, streak, rank, created_at
-     from study_groups
-     order by rank asc, created_at desc
-     limit 50`
+    `select
+       g.id,
+       g.name,
+       g.description,
+       g.owner_name,
+       g.members,
+       g.streak,
+       g.rank,
+       g.created_at,
+       case when gm.user_id is null then false else true end as joined
+     from study_groups g
+     left join group_members gm on gm.group_id = g.id and gm.user_id = $1
+     order by g.rank asc, g.created_at desc
+     limit 50`,
+    [userId]
   );
 
   return result.rows.map(normalizeGroup);
@@ -795,7 +986,8 @@ function normalizeGroup(row) {
     ownerName: row.owner_name,
     members: Number(row.members || 1),
     streak: Number(row.streak || 1),
-    rank: Number(row.rank || 99)
+    rank: Number(row.rank || 99),
+    joined: Boolean(row.joined)
   };
 }
 
@@ -1016,6 +1208,75 @@ Yeu cau:
 - Neu cau hoi mo hoac thieu de bai, hoi them thong tin can thiet.
 - Moi field toi da 700 ky tu, steps toi da 4 muc.
 `;
+}
+
+function mockStudyPlan(goal) {
+  const hours = Number(goal.hoursPerDay || 1);
+
+  return {
+    plan: [
+      {
+        title: "Chẩn đoán mục tiêu",
+        detail: `Tách mục tiêu ${goal.subject} thành 3 phần yếu nhất, làm bài kiểm tra nhanh trong 20 phút.`
+      },
+      {
+        title: "Lịch học cố định",
+        detail: `Mỗi ngày học ${hours} giờ, ưu tiên bài nền tảng trước rồi mới luyện đề theo deadline.`
+      },
+      {
+        title: "Sửa lỗi sai",
+        detail: "Sau mỗi phiên học ghi 1 lỗi sai chính, nguyên nhân và 1 bài tương tự để tránh lặp lại."
+      },
+      {
+        title: "Đánh giá bằng chứng",
+        detail: "Cuối ngày lưu ảnh, ghi chú hoặc timelapse để kiểm tra tiến độ thật thay vì chỉ cảm giác."
+      }
+    ],
+    today: [
+      { time: "19:30", title: `Ôn nền tảng ${goal.subject}`, minutes: 45 },
+      { time: "20:20", title: "Làm 12 câu trọng tâm", minutes: 45 },
+      { time: "21:10", title: "Ghi lỗi sai và việc ngày mai", minutes: 20 }
+    ],
+    warning: "Đây là dữ liệu MOCK_AI để test app, không tiêu tốn quota Gemini."
+  };
+}
+
+function mockMistakeAnalysis(mistake) {
+  return {
+    type: mistake.selfReason || "Chưa hiểu bản chất",
+    why: "Bạn có thể đang thiếu bước kiểm tra điều kiện hoặc chưa nối được công thức với dạng bài.",
+    fix: "Trước khi tính, viết rõ dữ kiện, điều kiện áp dụng và mục tiêu cần tìm.",
+    review: `Ôn lại phần nền tảng của ${mistake.subject}, tập trung vào dạng vừa sai.`,
+    practice: "Làm lại bài sai, sau đó làm thêm 2 bài cùng dạng trong 30 phút.",
+    scheduleTask: { title: `Sửa lỗi sai ${mistake.subject}`, minutes: 45 }
+  };
+}
+
+function mockTutorAnswer(request) {
+  return {
+    answer: `Mình đang trả lời bằng MOCK_AI cho mục tiêu ${request.goal.subject}. Hãy dùng câu trả lời này để test giao diện trước khi bật Gemini thật.`,
+    steps: [
+      "Xác định dữ kiện đề bài đã cho.",
+      "Chọn công thức hoặc phương pháp phù hợp.",
+      "Làm từng bước và kiểm tra điều kiện cuối cùng."
+    ],
+    hint: "Nếu muốn test Gemini thật, tắt MOCK_AI rồi gửi lại câu hỏi.",
+    practice: "Tạo một câu hỏi ngắn khác để kiểm tra luồng chat và lưu lịch sử."
+  };
+}
+
+function withFallbackWarning(payload, reason) {
+  const warning = `Gemini đang không khả dụng: ${reason} App đang dùng kết quả dự phòng để bạn vẫn test được luồng.`;
+
+  if ("warning" in payload) {
+    return { ...payload, warning };
+  }
+
+  if ("answer" in payload) {
+    return { ...payload, answer: `${warning}\n\n${payload.answer}` };
+  }
+
+  return { ...payload, why: `${warning} ${payload.why || ""}`.trim() };
 }
 
 function parsePlan(text) {
