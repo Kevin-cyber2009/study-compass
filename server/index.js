@@ -11,7 +11,7 @@ const host = process.env.API_HOST || "0.0.0.0";
 const model = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
 const geminiModels = getGeminiModels(
   model,
-  process.env.GEMINI_FALLBACK_MODELS || "gemini-2.0-flash"
+  process.env.GEMINI_FALLBACK_MODELS || ""
 );
 const mockAi = isTruthyEnv(process.env.MOCK_AI);
 const aiRequestSecret = String(process.env.AI_REQUEST_SECRET || "").trim();
@@ -477,7 +477,7 @@ function isTruthyEnv(value) {
 }
 
 function guardAiRequest(request, response) {
-  if (aiRequestSecret && request.get("x-study-compass-key") !== aiRequestSecret) {
+  if (!mockAi && aiRequestSecret && request.get("x-study-compass-key") !== aiRequestSecret) {
     response.status(401).json({ error: "AI endpoint is locked for this deployment." });
     return true;
   }
