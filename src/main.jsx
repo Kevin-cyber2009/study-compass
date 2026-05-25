@@ -4,11 +4,13 @@ import {
   AlarmClock,
   Award,
   BarChart3,
+  BellRing,
   BookOpenCheck,
   CalendarDays,
   Camera,
   CheckCircle2,
   Clock3,
+  Edit3,
   HelpCircle,
   LogOut,
   Heart,
@@ -23,15 +25,20 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Save,
   Send,
   Sparkles,
   Target,
+  Trash2,
   Trophy,
   UserPlus,
   Video,
-  UsersRound
+  UsersRound,
+  X
 } from "lucide-react";
 import "./styles.css";
+
+const REMINDER_ID_BASE = 20_000;
 
 const defaultGoal = {
   subject: "Toán 11",
@@ -106,6 +113,10 @@ function App() {
     source: "mock",
     message: "Đang dùng dữ liệu mẫu."
   });
+  const [reminderStatus, setReminderStatus] = useState({
+    source: "idle",
+    message: "Chưa bật nhắc lịch học."
+  });
   const [proofs, setProofs] = useState(() => load("proofs", 7));
   const [aiPlan, setAiPlan] = useState(() => load("aiPlan", null));
   const [tutorMessages, setTutorMessages] = useState(() => load("tutorMessages", [
@@ -129,6 +140,7 @@ function App() {
   const [apiHealth, setApiHealth] = useState({ status: "checking", message: "Dang kiem tra server AI..." });
   const lastSyncedGoal = useRef("");
   const lastSyncedTasks = useRef("");
+  const webReminderTimers = useRef([]);
   const serverUserId = authUser?.source === "server" ? authUser.id : null;
 
   const navigateTo = useCallback((nextTab) => {
@@ -172,6 +184,10 @@ function App() {
   useEffect(() => save("timelapses", timelapses), [timelapses]);
   useEffect(() => save("studyGroups", studyGroups), [studyGroups]);
   useEffect(() => save("mistakes", mistakes), [mistakes]);
+  useEffect(() => () => {
+    webReminderTimers.current.forEach((timer) => window.clearTimeout(timer));
+    webReminderTimers.current = [];
+  }, []);
 
   useEffect(() => {
     if (!serverUserId) {
@@ -359,6 +375,152 @@ function App() {
       setUsageStatus({ source: "mock", message: "Không mở được màn hình cấp quyền usage." });
     }
   }, []);
+
+  const scheduleStudyReminder = useCallback(async (task, index = 0, options = {}) => {
+    const reminderAt = getTaskReminderDate(task);
+    const quiet = Boolean(options.quiet);
+
+    if (!reminderAt) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: "Lịch này đã qua hoặc chưa có giờ hợp lệ để nhắc."
+        });
+      }
+      return false;
+    }
+
+    const title = `Đến giờ học: ${task.title}`;
+    const body = `${task.block} · ${task.mode} · ${task.minutes} phút`;
+
+    try {
+      const { Capacitor } = await import("@capacitor/core");
+
+      if (Capacitor.isNativePlatform()) {
+        const { LocalNotifications } = await import("@capacitor/local-notifications");
+        const permission = await LocalNotifications.requestPermissions();
+
+        if (permission.display !== "granted") {
+          if (!quiet) {
+            setReminderStatus({
+              source: "permission",
+              message: "Bạn cần cho phép thông báo để Study Compass nhắc lịch học."
+            });
+          }
+          return false;
+        }
+
+        await LocalNotifications.schedule({
+          notifications: [
+            {
+              id: makeReminderId(task, index),
+              title,
+              body,
+              schedule: { at: reminderAt },
+              extra: {
+                taskTitle: task.title,
+                taskBlock: task.block
+              }
+            }
+          ]
+        });
+
+        if (!quiet) {
+          setReminderStatus({
+            source: "native",
+            message: `Đã đặt nhắc trực tiếp lúc ${formatReminderTime(reminderAt)}.`
+          });
+        }
+        return true;
+      }
+    } catch (error) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: error.message || "Chưa đặt được thông báo nhắc học."
+        });
+      }
+      return false;
+    }
+
+    if (!("Notification" in window)) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: "Trình duyệt này chưa hỗ trợ thông báo trực tiếp."
+        });
+      }
+      return false;
+    }
+
+    let permission = Notification.permission;
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+
+    if (permission !== "granted") {
+      if (!quiet) {
+        setReminderStatus({
+          source: "permission",
+          message: "Bạn cần cho phép thông báo để Study Compass nhắc lịch học."
+        });
+      }
+      return false;
+    }
+
+    const delay = reminderAt.getTime() - Date.now();
+    if (delay > 2_147_483_647) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: "Lịch này ở quá xa để trình duyệt đặt nhắc tạm thời."
+        });
+      }
+      return false;
+    }
+
+    const timer = window.setTimeout(() => {
+      new Notification(title, { body });
+    }, Math.max(0, delay));
+    webReminderTimers.current.push(timer);
+
+    if (!quiet) {
+      setReminderStatus({
+        source: "web",
+        message: `Đã đặt nhắc lúc ${formatReminderTime(reminderAt)} khi app còn mở.`
+      });
+    }
+    return true;
+  }, []);
+
+  const scheduleAllStudyReminders = useCallback(async () => {
+    const upcomingTasks = tasks
+      .map((task, index) => ({ task, index, reminderAt: getTaskReminderDate(task) }))
+      .filter((item) => !item.task.done && item.reminderAt)
+      .sort((left, right) => left.reminderAt - right.reminderAt)
+      .slice(0, 20);
+
+    if (!upcomingTasks.length) {
+      setReminderStatus({
+        source: "error",
+        message: "Chưa có lịch sắp tới để đặt nhắc."
+      });
+      return;
+    }
+
+    let scheduledCount = 0;
+    for (const item of upcomingTasks) {
+      const ok = await scheduleStudyReminder(item.task, item.index, { quiet: true });
+      if (ok) scheduledCount += 1;
+    }
+
+    setReminderStatus({
+      source: scheduledCount ? "native" : "error",
+      message: scheduledCount
+        ? `Đã đặt ${scheduledCount} thông báo nhắc học sắp tới.`
+        : "Chưa đặt được thông báo nào. Hãy kiểm tra quyền thông báo."
+    });
+  }, [scheduleStudyReminder, tasks]);
 
   useEffect(() => {
     if (authUser) refreshUsageStats();
@@ -629,7 +791,15 @@ function App() {
             apiBaseUrl={apiBaseUrl}
           />
         )}
-        {active === "schedule" && <Schedule tasks={tasks} setTasks={setTasks} />}
+        {active === "schedule" && (
+          <Schedule
+            tasks={tasks}
+            setTasks={setTasks}
+            reminderStatus={reminderStatus}
+            onScheduleReminder={scheduleStudyReminder}
+            onScheduleAllReminders={scheduleAllStudyReminders}
+          />
+        )}
         {active === "focus" && (
           <Focus
             minutes={minutes}
@@ -1059,9 +1229,46 @@ function Planner({
   );
 }
 
-function Schedule({ tasks, setTasks }) {
+function Schedule({ tasks, setTasks, reminderStatus, onScheduleReminder, onScheduleAllReminders }) {
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [draft, setDraft] = useState(null);
+
   const addTask = () => {
-    setTasks([...tasks, { day: "Hôm nay", block: "20:00", title: "Phiên học mới", mode: "Học sâu", minutes: 45, done: false }]);
+    const nextTask = { day: "Hôm nay", block: "20:00", title: "Phiên học mới", mode: "Học sâu", minutes: 45, done: false };
+    setTasks([...tasks, nextTask]);
+    setEditingIndex(tasks.length);
+    setDraft(nextTask);
+  };
+
+  const startEdit = (task, index) => {
+    setEditingIndex(index);
+    setDraft({ ...task });
+  };
+
+  const cancelEdit = () => {
+    setEditingIndex(null);
+    setDraft(null);
+  };
+
+  const saveEdit = () => {
+    if (editingIndex === null || !draft) return;
+
+    const nextTask = {
+      ...draft,
+      title: draft.title.trim() || "Phiên học",
+      day: draft.day.trim() || "Hôm nay",
+      block: draft.block || "20:00",
+      mode: draft.mode.trim() || "Học sâu",
+      minutes: Math.max(1, Math.min(480, Number(draft.minutes || 45)))
+    };
+
+    setTasks(tasks.map((task, index) => index === editingIndex ? nextTask : task));
+    cancelEdit();
+  };
+
+  const deleteTask = (index) => {
+    setTasks(tasks.filter((_, taskIndex) => taskIndex !== index));
+    cancelEdit();
   };
 
   return (
@@ -1071,19 +1278,95 @@ function Schedule({ tasks, setTasks }) {
           <CalendarDays size={20} />
           <h2>Lịch học và nhắc nhở</h2>
         </div>
-        <button className="icon-button" onClick={addTask} title="Thêm phiên học"><Plus size={18} /></button>
+        <div className="schedule-actions">
+          <button className="icon-button" type="button" onClick={onScheduleAllReminders} title="Bật nhắc các lịch sắp tới">
+            <BellRing size={18} />
+          </button>
+          <button className="icon-button" type="button" onClick={addTask} title="Thêm phiên học"><Plus size={18} /></button>
+        </div>
       </div>
+      {reminderStatus?.message && (
+        <div className={`reminder-status ${reminderStatus.source}`}>
+          <BellRing size={16} />
+          <span>{reminderStatus.message}</span>
+        </div>
+      )}
       <div className="task-grid">
-        {tasks.map((task, index) => (
-          <article className={`task-card ${task.done ? "is-done" : ""}`} key={`${task.title}-${index}`}>
-            <button className="check-button" onClick={() => toggleTask(tasks, setTasks, index)} title="Đổi trạng thái">
-              <CheckCircle2 size={20} />
-            </button>
-            <span>{task.day} · {task.block}</span>
-            <strong>{task.title}</strong>
-            <p>{task.mode} · {task.minutes} phút</p>
-          </article>
-        ))}
+        {tasks.map((task, index) => {
+          const isEditing = editingIndex === index;
+
+          return (
+            <article className={`task-card ${task.done ? "is-done" : ""} ${isEditing ? "is-editing" : ""}`} key={`${task.title}-${index}`}>
+              {isEditing ? (
+                <div className="task-edit-form">
+                  <div className="task-edit-row">
+                    <label>
+                      Ngày
+                      <input value={draft.day} onChange={(event) => setDraft({ ...draft, day: event.target.value })} />
+                    </label>
+                    <label>
+                      Giờ
+                      <input type="time" value={draft.block} onChange={(event) => setDraft({ ...draft, block: event.target.value })} />
+                    </label>
+                  </div>
+                  <label>
+                    Nội dung
+                    <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
+                  </label>
+                  <div className="task-edit-row">
+                    <label>
+                      Chế độ
+                      <input value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value })} />
+                    </label>
+                    <label>
+                      Phút
+                      <input
+                        type="number"
+                        min="1"
+                        max="480"
+                        value={draft.minutes}
+                        onChange={(event) => setDraft({ ...draft, minutes: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <div className="task-actions">
+                    <button className="mini-action primary-mini" type="button" onClick={saveEdit} title="Lưu lịch học">
+                      <Save size={16} />
+                      Lưu
+                    </button>
+                    <button className="mini-action" type="button" onClick={cancelEdit} title="Hủy chỉnh sửa">
+                      <X size={16} />
+                      Hủy
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button className="check-button" type="button" onClick={() => toggleTask(tasks, setTasks, index)} title="Đổi trạng thái">
+                    <CheckCircle2 size={20} />
+                  </button>
+                  <span>{task.day} · {task.block}</span>
+                  <strong>{task.title}</strong>
+                  <p>{task.mode} · {task.minutes} phút</p>
+                  <div className="task-actions">
+                    <button className="mini-action" type="button" onClick={() => onScheduleReminder(task, index)} title="Đặt nhắc lịch này">
+                      <BellRing size={16} />
+                      Nhắc
+                    </button>
+                    <button className="mini-action" type="button" onClick={() => startEdit(task, index)} title="Sửa lịch học">
+                      <Edit3 size={16} />
+                      Sửa
+                    </button>
+                    <button className="mini-action danger-mini" type="button" onClick={() => deleteTask(index)} title="Xóa lịch học">
+                      <Trash2 size={16} />
+                      Xóa
+                    </button>
+                  </div>
+                </>
+              )}
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -1837,6 +2120,92 @@ function toggleTask(tasks, setTasks, index) {
   setTasks(tasks.map((task, taskIndex) => taskIndex === index ? { ...task, done: !task.done } : task));
 }
 
+function getTaskReminderDate(task, now = new Date()) {
+  const time = parseTaskTime(task.block);
+  if (!time) return null;
+
+  const dayInfo = getTaskDayInfo(task.day, now);
+  if (!dayInfo) return null;
+
+  const reminderAt = new Date(now);
+  reminderAt.setSeconds(0, 0);
+  reminderAt.setHours(time.hours, time.minutes, 0, 0);
+  reminderAt.setDate(now.getDate() + dayInfo.offset);
+
+  if (reminderAt <= now && dayInfo.kind === "weekday") {
+    reminderAt.setDate(reminderAt.getDate() + 7);
+  }
+
+  return reminderAt > now ? reminderAt : null;
+}
+
+function parseTaskTime(value = "") {
+  const match = String(value).match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+
+  return { hours, minutes };
+}
+
+function getTaskDayInfo(value = "", now = new Date()) {
+  const label = String(value).trim().toLocaleLowerCase("vi-VN");
+  if (!label || label.includes("hôm nay")) return { offset: 0, kind: "relative" };
+  if (label.includes("mai")) return { offset: 1, kind: "relative" };
+
+  const weekdays = [
+    ["chủ nhật", 0],
+    ["chu nhat", 0],
+    ["thứ 2", 1],
+    ["thứ hai", 1],
+    ["thu 2", 1],
+    ["thu hai", 1],
+    ["thứ 3", 2],
+    ["thứ ba", 2],
+    ["thu 3", 2],
+    ["thu ba", 2],
+    ["thứ 4", 3],
+    ["thứ tư", 3],
+    ["thu 4", 3],
+    ["thu tu", 3],
+    ["thứ 5", 4],
+    ["thứ năm", 4],
+    ["thu 5", 4],
+    ["thu nam", 4],
+    ["thứ 6", 5],
+    ["thứ sáu", 5],
+    ["thu 6", 5],
+    ["thu sau", 5],
+    ["thứ 7", 6],
+    ["thứ bảy", 6],
+    ["thu 7", 6],
+    ["thu bay", 6]
+  ];
+  const found = weekdays.find(([name]) => label.includes(name));
+  if (!found) return null;
+
+  const offset = (found[1] - now.getDay() + 7) % 7;
+  return { offset, kind: "weekday" };
+}
+
+function makeReminderId(task, index = 0) {
+  const numericId = Number(task.id);
+  const source = Number.isFinite(numericId) ? numericId : index + 1;
+  return REMINDER_ID_BASE + (Math.abs(Math.trunc(source)) % 50_000);
+}
+
+function formatReminderTime(date) {
+  return date.toLocaleString("vi-VN", {
+    weekday: "short",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function calculateStreak(doneCount, totalStudy) {
   const days = Math.max(1, doneCount + Math.floor(totalStudy / 180));
   const tiers = [
@@ -1938,11 +2307,13 @@ function formatTutorAnswer(data) {
   const sections = [data.answer].filter(Boolean);
 
   if (Array.isArray(data.steps) && data.steps.length) {
-    sections.push(`Các bước:\n${data.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}`);
+    const label = data.type === "knowledge" ? "Ý chính" : "Các bước";
+    sections.push(`${label}:\n${data.steps.map((step, index) => `${index + 1}. ${step}`).join("\n")}`);
   }
 
-  if (data.hint) sections.push(`Gợi ý: ${data.hint}`);
+  if (data.hint && data.type !== "knowledge") sections.push(`Gợi ý: ${data.hint}`);
   if (data.practice) sections.push(`Luyện tiếp: ${data.practice}`);
+  if (data.followUp) sections.push(`Hỏi tiếp: ${data.followUp}`);
 
   return sections.join("\n\n");
 }

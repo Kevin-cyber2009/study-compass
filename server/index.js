@@ -582,11 +582,11 @@ function toClientGeminiError(error) {
   const message = error?.message || "Unexpected Gemini error.";
 
   if (/quota|exceeded|rate limit/i.test(message)) {
-    return "Gemini API key da het quota hoac bi gioi han tam thoi. Hay doi GEMINI_API_KEY tren Render Environment roi redeploy.";
+    return "Gemini đang bận hoặc tạm hết lượt. Vui lòng thử lại sau ít phút.";
   }
 
   if (/high demand|overloaded|try again/i.test(message)) {
-    return `Gemini dang qua tai tam thoi. Server da thu cac model: ${geminiModels.join(", ")}. Bam lai sau 1-2 phut.`;
+    return "Gemini đang quá tải tạm thời. Vui lòng thử lại sau 1-2 phút.";
   }
 
   return message;
@@ -1180,7 +1180,12 @@ function buildTutorPrompt(request) {
     .join("\n");
 
   return `
-Ban la gia su AI cho hoc sinh Viet Nam trong app Study Compass. Day la cong cu hoc tap, khong lam bai thay hoc sinh.
+Ban la gia su AI cho hoc sinh Viet Nam trong app Study Compass.
+Hay nhan dien y dinh cau hoi truoc khi tra loi:
+- "knowledge": cau hoi kien thuc/su that/lich su/khoa hoc, vi du "ai phat minh ra bong den".
+- "exercise": bai tap can giai, co du kien, cong thuc, phep tinh, dap an.
+- "study": hoi ve cach hoc, lich hoc, deadline, dong luc.
+- "clarify": cau hoi qua thieu thong tin.
 
 Muc tieu hoc tap hien tai:
 - Mon hoc: ${request.goal.subject}
@@ -1196,15 +1201,18 @@ ${request.question}
 
 Chi tra ve JSON hop le theo schema:
 {
+  "type": "knowledge | exercise | study | clarify",
   "answer": "cau tra loi chinh bang tieng Viet co dau",
-  "steps": ["buoc 1", "buoc 2", "buoc 3"],
-  "hint": "goi y de hoc sinh tu lam tiep",
-  "practice": "mot bai tap nho hoac viec can lam tiep"
+  "steps": ["chi dung khi cau hoi can cac buoc hoac cac y chinh"],
+  "hint": "chi dung cho bai tap/cach hoc, de rong neu khong can",
+  "practice": "chi goi bai luyen neu that su lien quan",
+  "followUp": "mot cau hoi tiep theo ngan neu huu ich"
 }
 
 Yeu cau:
-- Giai thich ngan gon, de hieu, dung vai tro gia su.
-- Neu la bai tap, huong dan tung buoc va hoi lai hoc sinh o buoc quan trong, khong chi dua dap an cuoi.
+- Voi cau hoi knowledge: tra loi truc tiep 2-4 cau, them boi canh ngan neu can; khong bien thanh quy trinh lam bai, khong ep hoc sinh cung cap them thong tin.
+- Voi cau hoi exercise: huong dan tung buoc va hoi lai hoc sinh o buoc quan trong, khong chi dua dap an cuoi.
+- Voi cau hoi study: dua ra goi y hanh dong ngan, co the gan voi muc tieu hoc tap hien tai.
 - Neu cau hoi mo hoac thieu de bai, hoi them thong tin can thiet.
 - Moi field toi da 700 ky tu, steps toi da 4 muc.
 `;
@@ -1237,7 +1245,7 @@ function mockStudyPlan(goal) {
       { time: "20:20", title: "Làm 12 câu trọng tâm", minutes: 45 },
       { time: "21:10", title: "Ghi lỗi sai và việc ngày mai", minutes: 20 }
     ],
-    warning: "Đây là dữ liệu MOCK_AI để test app, không tiêu tốn quota Gemini."
+    warning: "Đang dùng dữ liệu thử nghiệm để bạn kiểm tra giao diện."
   };
 }
 
@@ -1253,20 +1261,39 @@ function mockMistakeAnalysis(mistake) {
 }
 
 function mockTutorAnswer(request) {
+  const question = String(request.question || "").toLocaleLowerCase("vi-VN");
+  const isKnowledgeQuestion = /^(ai|cái gì|gì|vì sao|tại sao|khi nào|ở đâu|who|what|why|when|where)\b/.test(question)
+    || question.includes("phát minh")
+    || question.includes("là ai")
+    || question.includes("là gì");
+
+  if (isKnowledgeQuestion) {
+    return {
+      type: "knowledge",
+      answer: "Thomas Edison thường được nhắc tới với bóng đèn sợi đốt thực dụng vì ông và nhóm của mình cải tiến nó đủ bền, rẻ và dùng được trong hệ thống điện thương mại. Tuy vậy, bóng đèn không phải do một người duy nhất tạo ra; trước Edison đã có nhiều nhà phát minh như Humphry Davy, Warren de la Rue và Joseph Swan đóng góp quan trọng.",
+      steps: [],
+      hint: "",
+      practice: "",
+      followUp: "Nếu muốn, mình có thể tóm tắt timeline phát triển bóng đèn trong 5 mốc."
+    };
+  }
+
   return {
-    answer: `Mình đang trả lời bằng MOCK_AI cho mục tiêu ${request.goal.subject}. Hãy dùng câu trả lời này để test giao diện trước khi bật Gemini thật.`,
+    type: "exercise",
+    answer: `Mình đang dùng câu trả lời thử nghiệm cho mục tiêu ${request.goal.subject}. Với bài tập, mình sẽ đi theo hướng gợi ý từng bước để bạn tự kiểm tra cách làm.`,
     steps: [
       "Xác định dữ kiện đề bài đã cho.",
       "Chọn công thức hoặc phương pháp phù hợp.",
       "Làm từng bước và kiểm tra điều kiện cuối cùng."
     ],
-    hint: "Nếu muốn test Gemini thật, tắt MOCK_AI rồi gửi lại câu hỏi.",
-    practice: "Tạo một câu hỏi ngắn khác để kiểm tra luồng chat và lưu lịch sử."
+    hint: "Gửi thêm đề bài cụ thể nếu bạn muốn mình bám sát từng dòng.",
+    practice: "Tạo một câu hỏi ngắn khác để kiểm tra luồng chat và lưu lịch sử.",
+    followUp: ""
   };
 }
 
 function withFallbackWarning(payload, reason) {
-  const warning = `Gemini đang không khả dụng: ${reason} App đang dùng kết quả dự phòng để bạn vẫn test được luồng.`;
+  const warning = `${reason} Mình tạm hiện gợi ý cơ bản để bạn không bị kẹt.`;
 
   if ("warning" in payload) {
     return { ...payload, warning };
@@ -1308,27 +1335,33 @@ function parsePlan(text) {
 function parseTutorAnswer(text) {
   if (!text) {
     return {
+      type: "clarify",
       answer: "Gemini khong tra ve noi dung.",
       steps: [],
       hint: "",
-      practice: ""
+      practice: "",
+      followUp: "Hay gui lai cau hoi ngan gon hon."
     };
   }
 
   try {
     const value = JSON.parse(text);
     return {
+      type: ["knowledge", "exercise", "study", "clarify"].includes(value.type) ? value.type : "study",
       answer: String(value.answer || "").slice(0, 900),
       steps: Array.isArray(value.steps) ? value.steps.slice(0, 4).map((item) => String(item).slice(0, 240)) : [],
       hint: String(value.hint || "").slice(0, 500),
-      practice: String(value.practice || "").slice(0, 500)
+      practice: String(value.practice || "").slice(0, 500),
+      followUp: String(value.followUp || "").slice(0, 500)
     };
   } catch {
     return {
+      type: "knowledge",
       answer: text.slice(0, 900),
       steps: [],
-      hint: "Neu van chua ro, hay gui them de bai hoac buoc em dang bi ket.",
-      practice: ""
+      hint: "",
+      practice: "",
+      followUp: "Neu van chua ro, hay gui them cau hoi cu the hon."
     };
   }
 }

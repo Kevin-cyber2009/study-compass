@@ -622,6 +622,44 @@ h2 {
   background: #f0f8e4;
 }
 
+.task-card.is-editing {
+  padding: 14px;
+}
+
+.schedule-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reminder-status {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid #d9e1d5;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #495650;
+  background: #fbfcf8;
+  font-size: 0.84rem;
+  font-weight: 850;
+}
+
+.reminder-status.native,
+.reminder-status.web {
+  border-color: #9ac8a3;
+  color: #22632e;
+  background: #edf8ee;
+}
+
+.reminder-status.permission,
+.reminder-status.error {
+  border-color: #efb0a7;
+  color: #a23428;
+  background: #fff1ef;
+}
+
 .check-button {
   position: absolute;
   left: 13px;
@@ -633,6 +671,66 @@ h2 {
   place-items: center;
   color: #2f6c80;
   background: #e5eadf;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+.mini-action {
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #47544f;
+  background: #eef2e9;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.primary-mini {
+  color: #17211d;
+  background: #a9d36f;
+}
+
+.danger-mini {
+  color: #8b2d23;
+  background: #ffe8e4;
+}
+
+.task-edit-form {
+  display: grid;
+  gap: 10px;
+}
+
+.task-edit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 8px;
+}
+
+.task-edit-form label {
+  display: grid;
+  gap: 6px;
+  color: #495650;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.task-edit-form input {
+  min-width: 0;
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #d9e1d5;
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: #1c2321;
+  background: #ffffff;
 }
 
 .timer-panel {
