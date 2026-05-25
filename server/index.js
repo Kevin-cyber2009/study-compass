@@ -64,7 +64,7 @@ app.post("/api/auth/register", async (request, response) => {
     const result = await pool.query(
       `insert into app_users (display_name, email, password_hash)
        values ($1, $2, $3)
-       returning id, display_name, email, created_at, proof_count`,
+       returning id, display_name, email, created_at, proof_count, avatar`,
       [user.name || "Hoc sinh moi", user.email, hashPassword(user.password)]
     );
     const created = normalizeUser(result.rows[0]);
@@ -88,7 +88,7 @@ app.post("/api/auth/login", async (request, response) => {
 
   try {
     const result = await pool.query(
-      `select id, display_name, email, password_hash, created_at, proof_count
+      `select id, display_name, email, password_hash, created_at, proof_count, avatar
        from app_users
        where email = $1`,
       [user.email]
@@ -156,15 +156,24 @@ app.put("/api/users/:userId/profile", async (request, response) => {
   const userId = Number(request.params.userId);
   if (!Number.isFinite(userId)) return response.status(400).json({ error: "Invalid user id." });
 
-  const proofs = Math.max(0, Math.min(100000, Number(request.body?.proofs || 0)));
+  const body = request.body || {};
+  const hasProofs = Object.prototype.hasOwnProperty.call(body, "proofs");
+  const hasName = typeof body.name === "string";
+  const hasAvatar = typeof body.avatar === "string";
+  const proofs = Math.max(0, Math.min(100000, Number(body.proofs || 0)));
+  const name = String(body.name || "").trim().slice(0, 80);
+  const avatar = String(body.avatar || "").slice(0, 2_800_000);
 
   try {
     const result = await pool.query(
       `update app_users
-       set proof_count = $2
+       set
+         proof_count = case when $2 then $3 else proof_count end,
+         display_name = case when $4 and $5 <> '' then $5 else display_name end,
+         avatar = case when $6 then $7 else avatar end
        where id = $1
-       returning id, display_name, email, created_at, proof_count`,
-      [userId, proofs]
+       returning id, display_name, email, created_at, proof_count, avatar`,
+      [userId, hasProofs, proofs, hasName, name, hasAvatar, avatar]
     );
     response.json({ user: normalizeUser(result.rows[0]) });
   } catch (error) {
@@ -197,10 +206,10 @@ app.post("/api/posts", async (request, response) => {
 
   try {
     const result = await pool.query(
-      `insert into social_posts (user_id, author, type, content, proof, image, study_minutes, likes)
-       values ($1, $2, $3, $4, $5, $6, $7, 0)
+      `insert into social_posts (user_id, author, author_avatar, type, content, proof, image, study_minutes, likes)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, 0)
        returning id`,
-      [safeUserId, post.author, post.type, post.content, post.proof, post.image, post.studyMinutes]
+      [safeUserId, post.author, post.authorAvatar, post.type, post.content, post.proof, post.image, post.studyMinutes]
     );
     const created = await getPost(result.rows[0].id);
     response.status(201).json(created);
@@ -618,10 +627,12 @@ async function initDatabase() {
       email text unique not null,
       password_hash text,
       proof_count integer not null default 0,
+      avatar text not null default '',
       created_at timestamptz not null default now()
     );
 
     alter table app_users add column if not exists proof_count integer not null default 0;
+    alter table app_users add column if not exists avatar text not null default '';
 
     create table if not exists study_goals (
       user_id bigint primary key references app_users(id) on delete cascade,
@@ -658,6 +669,7 @@ async function initDatabase() {
       id bigserial primary key,
       user_id bigint references app_users(id) on delete set null,
       author text not null,
+      author_avatar text not null default '',
       type text not null,
       content text not null,
       proof text,
@@ -669,6 +681,7 @@ async function initDatabase() {
 
     alter table social_posts add column if not exists image text;
     alter table social_posts add column if not exists likes integer not null default 0;
+    alter table social_posts add column if not exists author_avatar text not null default '';
 
     create table if not exists post_comments (
       id bigserial primary key,
@@ -847,6 +860,7 @@ async function listPosts() {
     select
       p.id,
       p.author,
+      p.author_avatar,
       p.type,
       p.content,
       p.proof,
@@ -881,6 +895,7 @@ async function getPost(id) {
     `select
       p.id,
       p.author,
+      p.author_avatar,
       p.type,
       p.content,
       p.proof,
@@ -957,6 +972,7 @@ function normalizePost(row) {
   return {
     id: Number(row.id),
     author: row.author,
+    authorAvatar: row.author_avatar || "",
     badge: "Server",
     type: row.type,
     content: row.content,
@@ -965,6 +981,7 @@ function normalizePost(row) {
     studyMinutes: Number(row.study_minutes || 0),
     likes: Number(row.likes || 0),
     comments: Array.isArray(row.comments) ? row.comments.map(normalizeComment) : [],
+    createdAt: row.created_at,
     liked: false
   };
 }
@@ -996,6 +1013,7 @@ function normalizeUser(row) {
     id: Number(row.id),
     name: row.display_name,
     email: row.email,
+    avatar: row.avatar || "",
     proofs: Number(row.proof_count || 0),
     joinedAt: row.created_at
   };
@@ -1080,6 +1098,7 @@ function sanitizeTutorRequest(request = {}) {
 function sanitizePost(post = {}) {
   return {
     author: String(post.author || "Hoc sinh").slice(0, 80),
+    authorAvatar: String(post.authorAvatar || "").slice(0, 2_800_000),
     type: String(post.type || "Minh chứng học tập").slice(0, 80),
     content: String(post.content || "").trim().slice(0, 1200),
     proof: String(post.proof || "").slice(0, 160),

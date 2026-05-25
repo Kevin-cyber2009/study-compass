@@ -21,16 +21,20 @@ import {
   Medal,
   MessageCircle,
   MessageSquarePlus,
+  Moon,
   Pause,
   Play,
   Plus,
   RefreshCw,
   Save,
   Send,
+  Settings as SettingsIcon,
   Sparkles,
+  Sun,
   Target,
   Trash2,
   Trophy,
+  UserRound,
   UserPlus,
   Video,
   UsersRound,
@@ -72,6 +76,7 @@ const seedPosts = [
   {
     id: 1,
     author: "Minh Anh",
+    authorAvatar: "",
     badge: "Chuỗi 9 ngày",
     type: "Điểm số",
     content: "Vừa kéo bài kiểm tra Toán từ 6.5 lên 8.2 sau 2 tuần theo lịch AI.",
@@ -80,11 +85,13 @@ const seedPosts = [
     studyMinutes: 1260,
     likes: 34,
     comments: 8,
+    createdAt: "2026-05-22T12:00:00.000Z",
     liked: false
   },
   {
     id: 2,
     author: "Quang Huy",
+    authorAvatar: "",
     badge: "Học sâu",
     type: "Kỷ luật",
     content: "Hoàn thành 4 phiên pomodoro 45 phút, không mở TikTok trong giờ học.",
@@ -93,6 +100,7 @@ const seedPosts = [
     studyMinutes: 180,
     likes: 21,
     comments: 5,
+    createdAt: "2026-05-21T12:00:00.000Z",
     liked: false
   }
 ];
@@ -104,6 +112,9 @@ function App() {
   const [tabHistory, setTabHistory] = useState(["dashboard"]);
   const [authUser, setAuthUser] = useState(() => load("authUser", null));
   const [users, setUsers] = useState(() => load("users", []));
+  const [tutorialSeen, setTutorialSeen] = useState(() => load("tutorialSeen", {}));
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [theme, setTheme] = useState(() => load("theme", "light"));
   const [goal, setGoal] = useState(() => load("goal", defaultGoal));
   const [tasks, setTasks] = useState(() => load("tasks", seedTasks));
   const [minutes, setMinutes] = useState(25 * 60);
@@ -175,6 +186,11 @@ function App() {
 
   useEffect(() => save("authUser", authUser), [authUser]);
   useEffect(() => save("users", users), [users]);
+  useEffect(() => save("tutorialSeen", tutorialSeen), [tutorialSeen]);
+  useEffect(() => {
+    save("theme", theme);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
   useEffect(() => save("goal", goal), [goal]);
   useEffect(() => save("tasks", tasks), [tasks]);
   useEffect(() => save("proofs", proofs), [proofs]);
@@ -188,6 +204,16 @@ function App() {
     webReminderTimers.current.forEach((timer) => window.clearTimeout(timer));
     webReminderTimers.current = [];
   }, []);
+
+  useEffect(() => {
+    if (!authUser) {
+      setShowTutorial(false);
+      return;
+    }
+
+    const key = userStorageKey(authUser);
+    setShowTutorial(Boolean(authUser.needsTutorial && key && !tutorialSeen[key]));
+  }, [authUser, tutorialSeen]);
 
   useEffect(() => {
     if (!serverUserId) {
@@ -526,35 +552,33 @@ function App() {
     if (authUser) refreshUsageStats();
   }, [authUser, refreshUsageStats]);
 
+  const refreshSocial = useCallback(async () => {
+    if (!authUser) return false;
+
+    try {
+      const userQuery = serverUserId ? `?userId=${encodeURIComponent(serverUserId)}` : "";
+      const response = await fetch(`${apiBaseUrl}/api/social${userQuery}`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Khong tai duoc du lieu cong dong.");
+
+      const syncedPosts = await syncLocalOnlyPosts(data.posts || seedPosts, authUser);
+      setPosts((currentPosts) => mergePostState(syncedPosts, currentPosts));
+      setStudyGroups(data.groups || groups);
+      setSocialStatus("server");
+      return true;
+    } catch {
+      setSocialStatus("local");
+      return false;
+    }
+  }, [authUser, serverUserId]);
+
   useEffect(() => {
     if (!authUser) return;
-    let cancelled = false;
 
-    const loadSocial = async () => {
-      try {
-        const userQuery = serverUserId ? `?userId=${encodeURIComponent(serverUserId)}` : "";
-        const response = await fetch(`${apiBaseUrl}/api/social${userQuery}`, { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "Khong tai duoc du lieu cong dong.");
-        if (cancelled) return;
-
-        const syncedPosts = await syncLocalOnlyPosts(data.posts || seedPosts, authUser);
-        if (cancelled) return;
-
-        setPosts(syncedPosts);
-        setStudyGroups(data.groups || groups);
-        setSocialStatus("server");
-      } catch {
-        if (!cancelled) setSocialStatus("local");
-      }
-    };
-
-    loadSocial();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authUser]);
+    refreshSocial();
+    const timer = window.setInterval(refreshSocial, 5000);
+    return () => window.clearInterval(timer);
+  }, [authUser, refreshSocial]);
 
   const fallbackPlan = useMemo(() => makePlan(goal), [goal]);
   const plan = aiPlan?.plan?.length ? aiPlan.plan : fallbackPlan;
@@ -696,7 +720,8 @@ function App() {
       if (Array.isArray(data.state?.tasks) && data.state.tasks.length) setTasks(data.state.tasks);
       if (typeof data.state?.proofs === "number") setProofs(data.state.proofs);
 
-      setAuthUser({ ...data.user, source: "server" });
+      const nextUser = { ...data.user, source: "server", needsTutorial: mode === "register" };
+      setAuthUser(nextUser);
       setStudySyncStatus("server");
       return "";
     } catch (error) {
@@ -719,15 +744,54 @@ function App() {
       };
 
       setUsers([...users, nextUser]);
-      setAuthUser({ ...withoutPassword(nextUser), source: "local" });
+      setAuthUser({ ...withoutPassword(nextUser), source: "local", avatar: "", needsTutorial: true });
       return "";
     }
 
     const found = users.find((user) => user.email === normalizedEmail && user.password === password);
     if (!found) return "Email hoặc mật khẩu không đúng.";
 
-    setAuthUser({ ...withoutPassword(found), source: "local" });
+    setAuthUser({ ...withoutPassword(found), source: "local", needsTutorial: false });
     return "";
+  };
+
+  const finishTutorial = () => {
+    const key = userStorageKey(authUser);
+    if (key) {
+      setTutorialSeen({ ...tutorialSeen, [key]: true });
+    }
+    setAuthUser((currentUser) => currentUser ? { ...currentUser, needsTutorial: false } : currentUser);
+    setShowTutorial(false);
+  };
+
+  const updateUserSettings = async ({ name, avatar }) => {
+    const cleanName = name.trim() || "Học sinh";
+    const nextUser = { ...authUser, name: cleanName, avatar };
+
+    setAuthUser(nextUser);
+    setUsers((currentUsers) => currentUsers.map((user) => (
+      user.email === authUser.email ? { ...user, name: cleanName, avatar } : user
+    )));
+
+    if (!serverUserId) {
+      setStudySyncStatus("local");
+      return "Đã lưu cài đặt trên máy.";
+    }
+
+    try {
+      const data = await apiRequest(`/api/users/${serverUserId}/profile`, {
+        method: "PUT",
+        body: JSON.stringify({ name: cleanName, avatar, proofs })
+      });
+      if (data.user) {
+        setAuthUser({ ...data.user, source: "server", needsTutorial: false });
+      }
+      setStudySyncStatus("server");
+      return "Đã đồng bộ cài đặt lên server.";
+    } catch {
+      setStudySyncStatus("local");
+      return "Đã lưu trên máy. Server chưa đồng bộ được lúc này.";
+    }
   };
 
   if (!authUser) {
@@ -735,7 +799,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell theme-${theme}`}>
       <header className="mobile-appbar">
         <div className="brand">
           <div className="brand-mark"><GraduationCap size={22} /></div>
@@ -842,9 +906,20 @@ function App() {
             groups={studyGroups}
             setGroups={setStudyGroups}
             socialStatus={socialStatus}
+            onRefresh={refreshSocial}
+          />
+        )}
+        {active === "settings" && (
+          <SettingsPanel
+            user={authUser}
+            theme={theme}
+            setTheme={setTheme}
+            onSave={updateUserSettings}
           />
         )}
       </main>
+
+      {showTutorial && <TutorialOverlay onSkip={finishTutorial} onDone={finishTutorial} />}
 
       <nav className="bottom-nav" aria-label="Thanh điều hướng chính">
         <NavButton icon={LayoutDashboard} label="Tổng quan" active={active === "dashboard"} onClick={() => navigateTo("dashboard")} />
@@ -854,6 +929,7 @@ function App() {
         <NavButton icon={Video} label="Quay" active={active === "timelapse"} onClick={() => navigateTo("timelapse")} />
         <NavButton icon={Medal} label="Hồ sơ" active={active === "profile"} onClick={() => navigateTo("profile")} />
         <NavButton icon={UsersRound} label="Feed" active={active === "social"} onClick={() => navigateTo("social")} />
+        <NavButton icon={SettingsIcon} label="Cài đặt" active={active === "settings"} onClick={() => navigateTo("settings")} />
       </nav>
     </div>
   );
@@ -1468,6 +1544,7 @@ function Timelapse({ user, clips, setClips, posts, setPosts, setActive }) {
     const nextPost = {
       id: Date.now(),
       author: user.name,
+      authorAvatar: user.avatar || "",
       badge: "Timelapse",
       type: "Timelapse",
       content: `${clip.title} - ${clip.minutes} phút học có video ghi lại.`,
@@ -1476,6 +1553,7 @@ function Timelapse({ user, clips, setClips, posts, setPosts, setActive }) {
       studyMinutes: clip.minutes,
       likes: 0,
       comments: [],
+      createdAt: new Date().toISOString(),
       liked: false
     };
 
@@ -1541,6 +1619,7 @@ function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes,
   return (
     <section className="profile-layout">
       <div className="profile-hero">
+        <UserAvatar user={user} size="large" />
         <div>
           <p className="eyebrow">Hồ sơ học tập</p>
           <h2>{user.name}</h2>
@@ -1572,7 +1651,129 @@ function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes,
   );
 }
 
-function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
+function TutorialOverlay({ onSkip, onDone }) {
+  return (
+    <div className="tutorial-backdrop" role="dialog" aria-modal="true" aria-label="Hướng dẫn sử dụng Study Compass">
+      <section className="tutorial-card">
+        <div className="panel-title spread">
+          <div>
+            <GraduationCap size={20} />
+            <h2>Bắt đầu với Study Compass</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onSkip} title="Bỏ qua hướng dẫn">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="tutorial-steps">
+          <article>
+            <Sparkles size={19} />
+            <div>
+              <strong>1. Nhập mục tiêu ở tab AI</strong>
+              <p>Gemini sẽ gợi ý lộ trình, lịch hôm nay và cách sửa lỗi sai.</p>
+            </div>
+          </article>
+          <article>
+            <CalendarDays size={19} />
+            <div>
+              <strong>2. Đưa việc cần học vào Lịch</strong>
+              <p>Sửa trực tiếp từng phiên, bật chuông để app nhắc đúng giờ.</p>
+            </div>
+          </article>
+          <article>
+            <Clock3 size={19} />
+            <div>
+              <strong>3. Học tập trung và lưu minh chứng</strong>
+              <p>Dùng Pomodoro, timelapse và Feed để giữ chuỗi học thật.</p>
+            </div>
+          </article>
+        </div>
+        <div className="tutorial-actions">
+          <button className="text-action" type="button" onClick={onSkip}>Skip</button>
+          <button className="primary-action" type="button" onClick={onDone}>Bắt đầu học</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsPanel({ user, theme, setTheme, onSave }) {
+  const [draft, setDraft] = useState({
+    name: user.name || "",
+    avatar: user.avatar || ""
+  });
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    setDraft({ name: user.name || "", avatar: user.avatar || "" });
+  }, [user.name, user.avatar]);
+
+  const attachAvatar = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 2_500_000) {
+      setStatus("Ảnh hơi nặng. Hãy chọn ảnh dưới khoảng 2.5 MB.");
+      event.target.value = "";
+      return;
+    }
+
+    const avatar = await fileToDataUrl(file);
+    setDraft((current) => ({ ...current, avatar }));
+    setStatus("");
+  };
+
+  const saveSettings = async () => {
+    const message = await onSave(draft);
+    setStatus(message);
+  };
+
+  return (
+    <section className="settings-layout">
+      <div className="panel settings-panel">
+        <div className="panel-title">
+          <SettingsIcon size={20} />
+          <h2>Cài đặt tài khoản</h2>
+        </div>
+        <div className="avatar-editor">
+          <UserAvatar user={{ name: draft.name, avatar: draft.avatar }} size="large" />
+          <label className="image-picker">
+            <Camera size={18} />
+            Đổi avatar
+            <input type="file" accept="image/*" onChange={attachAvatar} />
+          </label>
+        </div>
+        <label>
+          Tên hiển thị
+          <input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+        </label>
+        <button className="primary-action" type="button" onClick={saveSettings}>
+          <Save size={18} />
+          Lưu cài đặt
+        </button>
+        {status && <p className="settings-status">{status}</p>}
+      </div>
+
+      <div className="panel settings-panel">
+        <div className="panel-title">
+          {theme === "dark" ? <Moon size={20} /> : <Sun size={20} />}
+          <h2>Giao diện</h2>
+        </div>
+        <div className="theme-switch">
+          <button className={theme === "light" ? "active" : ""} type="button" onClick={() => setTheme("light")}>
+            <Sun size={18} />
+            Sáng
+          </button>
+          <button className={theme === "dark" ? "active" : ""} type="button" onClick={() => setTheme("dark")}>
+            <Moon size={18} />
+            Tối
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function Social({ user, posts, setPosts, groups, setGroups, socialStatus, onRefresh }) {
   const [draft, setDraft] = useState({
     type: "Điểm số",
     content: "",
@@ -1581,6 +1782,8 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
     image: "",
     mediaType: ""
   });
+  const [sortMode, setSortMode] = useState("newest");
+  const [refreshing, setRefreshing] = useState(false);
   const [commentDrafts, setCommentDrafts] = useState({});
   const [groupDraft, setGroupDraft] = useState({ name: "", description: "" });
   const [groupView, setGroupView] = useState("mine");
@@ -1589,8 +1792,15 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
   const myGroups = groups.filter((group) => group.joined);
   const discoverGroups = groups.filter((group) => !group.joined);
   const visibleGroups = groupView === "mine" ? myGroups : discoverGroups;
+  const visiblePosts = useMemo(() => sortPosts(posts, sortMode), [posts, sortMode]);
   const joinedGroups = {
     includes: (groupKey) => groups.some((group) => String(group.id || group.name) === groupKey && group.joined)
+  };
+
+  const refreshFeed = async () => {
+    setRefreshing(true);
+    await onRefresh?.();
+    setRefreshing(false);
   };
 
   const publishPost = async () => {
@@ -1600,6 +1810,7 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
     const nextPost = {
       id: Date.now(),
       author: user.name,
+      authorAvatar: user.avatar || "",
       badge: "Vừa đăng",
       type: draft.type,
       content,
@@ -1609,6 +1820,7 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       studyMinutes: Number(draft.studyMinutes || 0),
       likes: 0,
       comments: [],
+      createdAt: new Date().toISOString(),
       liked: false,
       localOnly: false
     };
@@ -1678,7 +1890,7 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
       id: Date.now(),
       author: user.name,
       content,
-      createdAt: new Date().toLocaleString("vi-VN")
+      createdAt: new Date().toISOString()
     };
 
     setCommentDrafts({ ...commentDrafts, [postId]: "" });
@@ -1858,14 +2070,26 @@ function Social({ user, posts, setPosts, groups, setGroups, socialStatus }) {
         </div>
       </div>
 
+      <div className="feed-toolbar">
+        <select value={sortMode} onChange={(event) => setSortMode(event.target.value)} aria-label="Sắp xếp bài đăng">
+          <option value="newest">Mới nhất</option>
+          <option value="oldest">Cũ nhất</option>
+          <option value="likes">Nhiều like nhất</option>
+          <option value="comments">Nhiều bình luận nhất</option>
+        </select>
+        <button className="icon-button" type="button" onClick={refreshFeed} title="Tải bài mới" disabled={refreshing}>
+          <RefreshCw size={18} />
+        </button>
+      </div>
+
       <div className="feed-list">
-        {posts.map((post) => (
+        {visiblePosts.map((post) => (
           <article className="post-card" key={post.id}>
             <header className="post-header">
-              <div className="avatar">{post.author.slice(0, 1)}</div>
+              <UserAvatar user={{ name: post.author, avatar: post.authorAvatar }} />
               <div>
                 <strong>{post.author}</strong>
-                <p>{post.badge} · {post.type}</p>
+                <p>{post.badge} · {post.type}{post.createdAt ? ` · ${formatPostTime(post.createdAt)}` : ""}</p>
               </div>
             </header>
             <p className="post-content">{post.content}</p>
@@ -2062,11 +2286,57 @@ async function syncLocalOnlyPosts(serverPosts, user) {
   return [...stillLocal, ...synced];
 }
 
+function mergePostState(nextPosts, currentPosts) {
+  const currentById = new Map(currentPosts.map((post) => [String(post.id), post]));
+
+  return nextPosts.map((post) => {
+    const current = currentById.get(String(post.id));
+    if (!current) return post;
+
+    return {
+      ...post,
+      liked: Boolean(current.liked),
+      likes: Math.max(Number(post.likes || 0), Number(current.likes || 0))
+    };
+  });
+}
+
 function hasEquivalentPost(posts, target) {
   return posts.some((post) => (
     post.id === target.id ||
     (post.author === target.author && post.content === target.content && post.proof === target.proof)
   ));
+}
+
+function sortPosts(posts, sortMode) {
+  return [...posts].sort((left, right) => {
+    if (sortMode === "oldest") return getPostTimestamp(left) - getPostTimestamp(right);
+    if (sortMode === "likes") return Number(right.likes || 0) - Number(left.likes || 0);
+    if (sortMode === "comments") return commentCount(right) - commentCount(left);
+    return getPostTimestamp(right) - getPostTimestamp(left);
+  });
+}
+
+function getPostTimestamp(post) {
+  const parsed = Date.parse(post.createdAt || "");
+  if (Number.isFinite(parsed)) return parsed;
+  const numericId = Number(post.id);
+  return Number.isFinite(numericId) ? numericId : 0;
+}
+
+function commentCount(post) {
+  return Array.isArray(post.comments) ? post.comments.length : Number(post.comments || 0);
+}
+
+function formatPostTime(value) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "";
+  return new Date(parsed).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function userStorageKey(user) {
+  if (!user) return "";
+  return String(user.source === "server" ? `server:${user.id}` : `local:${user.email || user.id}`);
 }
 
 function fileToDataUrl(file) {
@@ -2084,6 +2354,16 @@ function isVideoMedia(value = "") {
 
 function mediaLabel(value = "") {
   return isVideoMedia(value) ? "video minh chứng" : "ảnh minh chứng";
+}
+
+function UserAvatar({ user, size = "normal" }) {
+  const initial = String(user?.name || "H").trim().slice(0, 1).toUpperCase() || "H";
+
+  return (
+    <div className={`avatar ${size === "large" ? "avatar-large" : ""}`}>
+      {user?.avatar ? <img src={user.avatar} alt={`Avatar của ${user.name || "người dùng"}`} /> : <span>{initial}</span>}
+    </div>
+  );
 }
 
 function Metric({ icon: Icon, label, value, note }) {
@@ -2234,7 +2514,8 @@ function screenTitle(active) {
     focus: "Phiên tập trung",
     timelapse: "Timelapse học tập",
     profile: "Hồ sơ thành tích",
-    social: "Xã hội học tập"
+    social: "Xã hội học tập",
+    settings: "Cài đặt"
   };
   return titles[active];
 }
