@@ -43,6 +43,8 @@ import {
 import "./styles.css";
 
 const REMINDER_ID_BASE = 20_000;
+const DEADLINE_REMINDER_ID_BASE = 70_000;
+const RHYTHM_REMINDER_ID_BASE = 90_000;
 
 const defaultGoal = {
   subject: "Toán 11",
@@ -57,6 +59,47 @@ const seedTasks = [
   { day: "Hôm nay", block: "20:15", title: "20 câu lượng giác cơ bản", mode: "Luyện tập", minutes: 60, done: false },
   { day: "Ngày mai", block: "19:45", title: "Sửa lỗi sai và ghi nhật ký", mode: "Phản tư", minutes: 35, done: false },
   { day: "Thứ 7", block: "08:30", title: "Mini test theo deadline", mode: "Kiểm tra", minutes: 75, done: false }
+];
+
+const seedDeadlines = [
+  {
+    id: 1,
+    title: "Mini test hàm số",
+    subject: "Toán 11",
+    dueDate: getIsoDateOffset(3),
+    dueTime: "20:00",
+    scope: "short",
+    priority: "high",
+    reminderLead: 1440,
+    note: "Hoàn thành 2 đề nhỏ trước giờ kiểm tra.",
+    done: false
+  },
+  {
+    id: 2,
+    title: "Mục tiêu 8+ học kỳ",
+    subject: "Toán 11",
+    dueDate: getIsoDateOffset(21),
+    dueTime: "21:00",
+    scope: "long",
+    priority: "medium",
+    reminderLead: 2880,
+    note: "Mỗi tuần chốt lại phần yếu và cập nhật lịch AI.",
+    done: false
+  }
+];
+
+const defaultStudyRhythm = {
+  preset: "deep",
+  studyMinutes: 45,
+  breakMinutes: 10,
+  reviewMinutes: 8,
+  relaxLimitMinutes: 30
+};
+
+const rhythmPresets = [
+  { preset: "pomodoro", label: "25/5", studyMinutes: 25, breakMinutes: 5, reviewMinutes: 5, relaxLimitMinutes: 20 },
+  { preset: "deep", label: "45/10", studyMinutes: 45, breakMinutes: 10, reviewMinutes: 8, relaxLimitMinutes: 30 },
+  { preset: "exam", label: "60/15", studyMinutes: 60, breakMinutes: 15, reviewMinutes: 10, relaxLimitMinutes: 25 }
 ];
 
 const apps = [
@@ -117,8 +160,12 @@ function App() {
   const [theme, setTheme] = useState(() => load("theme", "light"));
   const [goal, setGoal] = useState(() => load("goal", defaultGoal));
   const [tasks, setTasks] = useState(() => load("tasks", seedTasks));
+  const [deadlines, setDeadlines] = useState(() => load("deadlines", seedDeadlines));
+  const [studyRhythm, setStudyRhythm] = useState(() => load("studyRhythm", defaultStudyRhythm));
   const [minutes, setMinutes] = useState(25 * 60);
   const [running, setRunning] = useState(false);
+  const [focusSession, setFocusSession] = useState(() => load("focusSession", null));
+  const [focusSessions, setFocusSessions] = useState(() => load("focusSessions", []));
   const [deviceApps, setDeviceApps] = useState(apps);
   const [usageStatus, setUsageStatus] = useState({
     source: "mock",
@@ -151,6 +198,9 @@ function App() {
   const [apiHealth, setApiHealth] = useState({ status: "checking", message: "Dang kiem tra server AI..." });
   const lastSyncedGoal = useRef("");
   const lastSyncedTasks = useRef("");
+  const lastSyncedDeadlines = useRef("");
+  const lastSyncedStudyRhythm = useRef("");
+  const focusSyncing = useRef(false);
   const webReminderTimers = useRef([]);
   const serverUserId = authUser?.source === "server" ? authUser.id : null;
 
@@ -193,6 +243,10 @@ function App() {
   }, [theme]);
   useEffect(() => save("goal", goal), [goal]);
   useEffect(() => save("tasks", tasks), [tasks]);
+  useEffect(() => save("deadlines", deadlines), [deadlines]);
+  useEffect(() => save("studyRhythm", studyRhythm), [studyRhythm]);
+  useEffect(() => save("focusSession", focusSession), [focusSession]);
+  useEffect(() => save("focusSessions", focusSessions), [focusSessions]);
   useEffect(() => save("proofs", proofs), [proofs]);
   useEffect(() => save("aiPlan", aiPlan), [aiPlan]);
   useEffect(() => save("tutorMessages", tutorMessages), [tutorMessages]);
@@ -229,11 +283,18 @@ function App() {
         if (cancelled) return;
 
         if (data.goal) setGoal(data.goal);
-        if (Array.isArray(data.tasks) && data.tasks.length) setTasks(data.tasks);
+        if (Array.isArray(data.tasks)) setTasks(data.tasks);
+        if (Array.isArray(data.deadlines)) setDeadlines(data.deadlines);
+        if (data.studyRhythm) setStudyRhythm(data.studyRhythm);
+        if (Array.isArray(data.focusSessions)) {
+          setFocusSessions((current) => mergeFocusSessionState(data.focusSessions, current));
+        }
         if (typeof data.proofs === "number") setProofs(data.proofs);
 
         lastSyncedGoal.current = JSON.stringify(data.goal || goal);
-        lastSyncedTasks.current = JSON.stringify(data.tasks?.length ? data.tasks : tasks);
+        lastSyncedTasks.current = JSON.stringify(Array.isArray(data.tasks) ? data.tasks : tasks);
+        lastSyncedDeadlines.current = JSON.stringify(Array.isArray(data.deadlines) ? data.deadlines : deadlines);
+        lastSyncedStudyRhythm.current = data.studyRhythm ? JSON.stringify(data.studyRhythm) : "";
         setStudySyncStatus("server");
       } catch {
         if (!cancelled) setStudySyncStatus("local");
@@ -299,6 +360,60 @@ function App() {
   useEffect(() => {
     if (!serverUserId) return;
 
+    const serialized = JSON.stringify(deadlines);
+    if (serialized === lastSyncedDeadlines.current) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        const data = await apiRequest(`/api/users/${serverUserId}/deadlines`, {
+          method: "PUT",
+          body: JSON.stringify({ deadlines })
+        });
+        if (Array.isArray(data.deadlines)) {
+          lastSyncedDeadlines.current = JSON.stringify(data.deadlines);
+          setDeadlines(data.deadlines);
+        } else {
+          lastSyncedDeadlines.current = serialized;
+        }
+        setStudySyncStatus("server");
+      } catch {
+        setStudySyncStatus("local");
+      }
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [deadlines, serverUserId]);
+
+  useEffect(() => {
+    if (!serverUserId) return;
+
+    const serialized = JSON.stringify(studyRhythm);
+    if (serialized === lastSyncedStudyRhythm.current) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        const data = await apiRequest(`/api/users/${serverUserId}/study-rhythm`, {
+          method: "PUT",
+          body: JSON.stringify({ studyRhythm })
+        });
+        if (data.studyRhythm) {
+          lastSyncedStudyRhythm.current = JSON.stringify(data.studyRhythm);
+          setStudyRhythm(data.studyRhythm);
+        } else {
+          lastSyncedStudyRhythm.current = serialized;
+        }
+        setStudySyncStatus("server");
+      } catch {
+        setStudySyncStatus("local");
+      }
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [studyRhythm, serverUserId]);
+
+  useEffect(() => {
+    if (!serverUserId) return;
+
     const timer = setTimeout(async () => {
       try {
         await apiRequest(`/api/users/${serverUserId}/profile`, {
@@ -315,10 +430,62 @@ function App() {
   }, [proofs, serverUserId]);
 
   useEffect(() => {
+    if (!serverUserId || focusSyncing.current) return;
+
+    const unsynced = focusSessions
+      .filter((session) => session?.endedAt && session.synced !== true)
+      .slice(0, 20);
+
+    if (!unsynced.length) return;
+
+    let cancelled = false;
+    focusSyncing.current = true;
+
+    const syncFocusSessions = async () => {
+      const savedSessions = [];
+      let failed = false;
+
+      for (const session of unsynced) {
+        try {
+          const data = await apiRequest(`/api/users/${serverUserId}/focus-sessions`, {
+            method: "POST",
+            body: JSON.stringify({ session })
+          });
+          if (data.session) savedSessions.push(data.session);
+        } catch {
+          failed = true;
+        }
+      }
+
+      if (!cancelled && savedSessions.length) {
+        setFocusSessions((current) => mergeFocusSessionState(savedSessions, current));
+      }
+
+      if (!cancelled) {
+        setStudySyncStatus(failed ? "local" : "server");
+        focusSyncing.current = false;
+      }
+    };
+
+    syncFocusSessions();
+
+    return () => {
+      cancelled = true;
+      focusSyncing.current = false;
+    };
+  }, [focusSessions, serverUserId]);
+
+  useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => setMinutes((value) => Math.max(0, value - 1)), 1000);
     return () => clearInterval(timer);
   }, [running]);
+
+  useEffect(() => {
+    if (running && minutes === 0) {
+      setRunning(false);
+    }
+  }, [minutes, running]);
 
   useEffect(() => {
     let cancelled = false;
@@ -548,6 +715,214 @@ function App() {
     });
   }, [scheduleStudyReminder, tasks]);
 
+  const scheduleCustomReminder = useCallback(async ({
+    id,
+    title,
+    body,
+    reminderAt,
+    quiet = false,
+    invalidMessage = "Mốc nhắc này đã qua hoặc chưa hợp lệ.",
+    successMessage = "Đã đặt nhắc.",
+    extra = {}
+  }) => {
+    if (!reminderAt) {
+      if (!quiet) {
+        setReminderStatus({ source: "error", message: invalidMessage });
+      }
+      return false;
+    }
+
+    try {
+      const { Capacitor } = await import("@capacitor/core");
+
+      if (Capacitor.isNativePlatform()) {
+        const { LocalNotifications } = await import("@capacitor/local-notifications");
+        const permission = await LocalNotifications.requestPermissions();
+
+        if (permission.display !== "granted") {
+          if (!quiet) {
+            setReminderStatus({
+              source: "permission",
+              message: "Bạn cần cho phép thông báo để Study Compass nhắc đúng nhịp học."
+            });
+          }
+          return false;
+        }
+
+        await LocalNotifications.schedule({
+          notifications: [
+            {
+              id,
+              title,
+              body,
+              schedule: { at: reminderAt },
+              extra
+            }
+          ]
+        });
+
+        if (!quiet) {
+          setReminderStatus({ source: "native", message: successMessage });
+        }
+        return true;
+      }
+    } catch (error) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: error.message || "Chưa đặt được nhắc."
+        });
+      }
+      return false;
+    }
+
+    if (!("Notification" in window)) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: "Trình duyệt này chưa hỗ trợ thông báo trực tiếp."
+        });
+      }
+      return false;
+    }
+
+    let permission = Notification.permission;
+    if (permission === "default") {
+      permission = await Notification.requestPermission();
+    }
+
+    if (permission !== "granted") {
+      if (!quiet) {
+        setReminderStatus({
+          source: "permission",
+          message: "Bạn cần cho phép thông báo để Study Compass nhắc đúng nhịp học."
+        });
+      }
+      return false;
+    }
+
+    const delay = reminderAt.getTime() - Date.now();
+    if (delay > 2_147_483_647) {
+      if (!quiet) {
+        setReminderStatus({
+          source: "error",
+          message: "Mốc nhắc này ở quá xa để trình duyệt đặt nhắc tạm thời."
+        });
+      }
+      return false;
+    }
+
+    const timer = window.setTimeout(() => {
+      new Notification(title, { body });
+    }, Math.max(0, delay));
+    webReminderTimers.current.push(timer);
+
+    if (!quiet) {
+      setReminderStatus({ source: "web", message: successMessage });
+    }
+    return true;
+  }, []);
+
+  const scheduleDeadlineReminder = useCallback(async (deadline, index = 0, options = {}) => {
+    const reminderAt = getDeadlineReminderDate(deadline);
+    const dueAt = getDeadlineDueDate(deadline);
+    const quiet = Boolean(options.quiet);
+
+    return scheduleCustomReminder({
+      id: makeDeadlineReminderId(deadline, index),
+      title: `Deadline sắp tới: ${deadline.title}`,
+      body: `${deadline.subject || "Môn học"} · hạn ${dueAt ? formatReminderTime(dueAt) : "chưa rõ"}`,
+      reminderAt,
+      quiet,
+      invalidMessage: "Deadline này đã qua hoặc chưa có ngày giờ hợp lệ để nhắc.",
+      successMessage: reminderAt ? `Đã đặt nhắc deadline lúc ${formatReminderTime(reminderAt)}.` : "Đã đặt nhắc deadline.",
+      extra: {
+        deadlineId: deadline.id,
+        deadlineTitle: deadline.title
+      }
+    });
+  }, [scheduleCustomReminder]);
+
+  const scheduleAllDeadlineReminders = useCallback(async () => {
+    const upcomingDeadlines = sortDeadlines(deadlines)
+      .map((deadline, index) => ({ deadline, index, reminderAt: getDeadlineReminderDate(deadline) }))
+      .filter((item) => !item.deadline.done && item.reminderAt)
+      .slice(0, 20);
+
+    if (!upcomingDeadlines.length) {
+      setReminderStatus({
+        source: "error",
+        message: "Chưa có deadline sắp tới để đặt nhắc."
+      });
+      return;
+    }
+
+    let scheduledCount = 0;
+    for (const item of upcomingDeadlines) {
+      const ok = await scheduleDeadlineReminder(item.deadline, item.index, { quiet: true });
+      if (ok) scheduledCount += 1;
+    }
+
+    setReminderStatus({
+      source: scheduledCount ? "native" : "error",
+      message: scheduledCount
+        ? `Đã đặt ${scheduledCount} nhắc deadline sắp tới.`
+        : "Chưa đặt được nhắc deadline nào. Hãy kiểm tra quyền thông báo."
+    });
+  }, [deadlines, scheduleDeadlineReminder]);
+
+  const scheduleRhythmReminders = useCallback(async () => {
+    const items = makeRhythmReminderItems(studyRhythm);
+
+    let scheduledCount = 0;
+    for (const item of items) {
+      const ok = await scheduleCustomReminder({
+        id: item.id,
+        title: item.title,
+        body: item.body,
+        reminderAt: item.at,
+        quiet: true,
+        extra: { rhythmStep: item.step }
+      });
+      if (ok) scheduledCount += 1;
+    }
+
+    setReminderStatus({
+      source: scheduledCount ? "native" : "error",
+      message: scheduledCount
+        ? `Đã đặt ${scheduledCount} nhắc cho nhịp học ${studyRhythm.studyMinutes}/${studyRhythm.breakMinutes}.`
+        : "Chưa đặt được nhắc nhịp học. Hãy kiểm tra quyền thông báo."
+    });
+  }, [scheduleCustomReminder, studyRhythm]);
+
+  const createDeadlineTask = useCallback((deadline) => {
+    const dueAt = getDeadlineDueDate(deadline);
+    const block = dueAt ? getStudyBlockBeforeDeadline(dueAt) : "20:00";
+    setTasks([
+      {
+        day: getDeadlineTaskDay(deadline),
+        block,
+        title: `Chạy deadline: ${deadline.title}`,
+        mode: `${deadlineScopeLabel(deadline.scope)} · ${deadlinePriorityLabel(deadline.priority)}`,
+        minutes: studyRhythm.studyMinutes,
+        done: false
+      },
+      ...tasks
+    ]);
+    navigateTo("schedule");
+  }, [navigateTo, studyRhythm.studyMinutes, tasks]);
+
+  const saveCompletedFocusSession = useCallback((session) => {
+    const clientId = String(session.clientId || session.id || Date.now());
+    const nextSession = {
+      ...session,
+      clientId,
+      synced: false
+    };
+
+    setFocusSessions((current) => mergeFocusSessionState([nextSession], current));
+  }, []);
+
   useEffect(() => {
     if (authUser) refreshUsageStats();
   }, [authUser, refreshUsageStats]);
@@ -582,6 +957,12 @@ function App() {
 
   const fallbackPlan = useMemo(() => makePlan(goal), [goal]);
   const plan = aiPlan?.plan?.length ? aiPlan.plan : fallbackPlan;
+  const sortedDeadlines = useMemo(() => sortDeadlines(deadlines), [deadlines]);
+  const deadlineStats = useMemo(() => summarizeDeadlines(deadlines), [deadlines]);
+  const rhythmPlan = useMemo(
+    () => buildRhythmPlan({ tasks, deadlines, studyRhythm, apps: deviceApps }),
+    [tasks, deadlines, studyRhythm, deviceApps]
+  );
   const doneCount = tasks.filter((task) => task.done).length;
   const totalStudy = tasks.reduce((sum, task) => sum + (task.done ? task.minutes : 0), 0);
   const streak = calculateStreak(doneCount, totalStudy);
@@ -713,12 +1094,22 @@ function App() {
     try {
       const data = await apiRequest(`/api/auth/${mode === "register" ? "register" : "login"}`, {
         method: "POST",
-        body: JSON.stringify({ name, email: normalizedEmail, password, goal })
+        body: JSON.stringify({ name, email: normalizedEmail, password, goal, tasks, deadlines, studyRhythm, focusSessions })
       });
 
       if (data.state?.goal) setGoal(data.state.goal);
-      if (Array.isArray(data.state?.tasks) && data.state.tasks.length) setTasks(data.state.tasks);
+      if (Array.isArray(data.state?.tasks)) setTasks(data.state.tasks);
+      if (Array.isArray(data.state?.deadlines)) setDeadlines(data.state.deadlines);
+      if (data.state?.studyRhythm) setStudyRhythm(data.state.studyRhythm);
+      if (Array.isArray(data.state?.focusSessions)) {
+        setFocusSessions((current) => mergeFocusSessionState(data.state.focusSessions, current));
+      }
       if (typeof data.state?.proofs === "number") setProofs(data.state.proofs);
+
+      lastSyncedGoal.current = JSON.stringify(data.state?.goal || goal);
+      lastSyncedTasks.current = JSON.stringify(Array.isArray(data.state?.tasks) ? data.state.tasks : tasks);
+      lastSyncedDeadlines.current = JSON.stringify(Array.isArray(data.state?.deadlines) ? data.state.deadlines : deadlines);
+      lastSyncedStudyRhythm.current = data.state?.studyRhythm ? JSON.stringify(data.state.studyRhythm) : "";
 
       const nextUser = { ...data.user, source: "server", needsTutorial: mode === "register" };
       setAuthUser(nextUser);
@@ -823,10 +1214,13 @@ function App() {
           <Dashboard
             goal={goal}
             tasks={tasks}
+            deadlines={sortedDeadlines}
+            deadlineStats={deadlineStats}
             doneCount={doneCount}
             totalStudy={totalStudy}
             streak={streak}
             plan={plan}
+            rhythmPlan={rhythmPlan}
             setActive={navigateTo}
           />
         )}
@@ -859,19 +1253,37 @@ function App() {
           <Schedule
             tasks={tasks}
             setTasks={setTasks}
+            deadlines={sortedDeadlines}
+            setDeadlines={setDeadlines}
+            studyRhythm={studyRhythm}
             reminderStatus={reminderStatus}
             onScheduleReminder={scheduleStudyReminder}
             onScheduleAllReminders={scheduleAllStudyReminders}
+            onScheduleDeadlineReminder={scheduleDeadlineReminder}
+            onScheduleAllDeadlineReminders={scheduleAllDeadlineReminders}
+            onCreateDeadlineTask={createDeadlineTask}
+            onScheduleRhythmReminders={scheduleRhythmReminders}
           />
         )}
         {active === "focus" && (
           <Focus
+            goal={goal}
+            tasks={tasks}
+            deadlines={sortedDeadlines}
             minutes={minutes}
             setMinutes={setMinutes}
             running={running}
             setRunning={setRunning}
+            focusSession={focusSession}
+            setFocusSession={setFocusSession}
+            focusSessions={focusSessions}
+            onCompleteFocusSession={saveCompletedFocusSession}
             apps={deviceApps}
             usageStatus={usageStatus}
+            studyRhythm={studyRhythm}
+            setStudyRhythm={setStudyRhythm}
+            rhythmPlan={rhythmPlan}
+            onScheduleRhythmReminders={scheduleRhythmReminders}
             onRefreshUsage={refreshUsageStats}
             onOpenUsageSettings={openUsageSettings}
           />
@@ -935,7 +1347,7 @@ function App() {
   );
 }
 
-function Dashboard({ goal, tasks, doneCount, totalStudy, streak, plan, setActive }) {
+function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStudy, streak, plan, rhythmPlan, setActive }) {
   return (
     <section className="dashboard-grid">
       <Metric icon={Target} label="Mục tiêu chính" value={goal.subject} note={goal.target} />
@@ -949,6 +1361,7 @@ function Dashboard({ goal, tasks, doneCount, totalStudy, streak, plan, setActive
         </div>
       </article>
       <Metric icon={Clock3} label="Giờ học đã xác nhận" value={`${Math.round(totalStudy / 60)}h`} note={`${doneCount}/${tasks.length} phiên hoàn thành`} />
+      <Metric icon={AlarmClock} label="Deadline gần" value={deadlineStats.label} note={deadlineStats.note} />
 
       <div className="panel wide">
         <div className="panel-title">
@@ -984,6 +1397,24 @@ function Dashboard({ goal, tasks, doneCount, totalStudy, streak, plan, setActive
         ))}
         <button className="text-action" onClick={() => setActive("schedule")}>Mở lịch học</button>
         <button className="text-action subtle-action" onClick={() => setActive("planner")}>Đổi mục tiêu học</button>
+      </div>
+
+      <div className="panel">
+        <div className="panel-title">
+          <BellRing size={20} />
+          <h2>Nhịp học hôm nay</h2>
+        </div>
+        <div className="rhythm-mini-list">
+          {rhythmPlan.blocks.slice(0, 3).map((block) => (
+            <div className="rhythm-mini-row" key={block.label}>
+              <span>{block.minutes}p</span>
+              <div>
+                <strong>{block.label}</strong>
+                <p>{block.detail}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -1305,7 +1736,20 @@ function Planner({
   );
 }
 
-function Schedule({ tasks, setTasks, reminderStatus, onScheduleReminder, onScheduleAllReminders }) {
+function Schedule({
+  tasks,
+  setTasks,
+  deadlines,
+  setDeadlines,
+  studyRhythm,
+  reminderStatus,
+  onScheduleReminder,
+  onScheduleAllReminders,
+  onScheduleDeadlineReminder,
+  onScheduleAllDeadlineReminders,
+  onCreateDeadlineTask,
+  onScheduleRhythmReminders
+}) {
   const [editingIndex, setEditingIndex] = useState(null);
   const [draft, setDraft] = useState(null);
 
@@ -1348,108 +1792,370 @@ function Schedule({ tasks, setTasks, reminderStatus, onScheduleReminder, onSched
   };
 
   return (
-    <section className="panel full-panel">
-      <div className="panel-title spread">
-        <div>
-          <CalendarDays size={20} />
-          <h2>Lịch học và nhắc nhở</h2>
+    <section className="schedule-layout">
+      <div className="panel full-panel">
+        <div className="panel-title spread">
+          <div>
+            <CalendarDays size={20} />
+            <h2>Lịch học và nhắc nhở</h2>
+          </div>
+          <div className="schedule-actions">
+            <button className="icon-button" type="button" onClick={onScheduleRhythmReminders} title={`Bật nhịp học ${studyRhythm.studyMinutes}/${studyRhythm.breakMinutes}`}>
+              <Clock3 size={18} />
+            </button>
+            <button className="icon-button" type="button" onClick={onScheduleAllReminders} title="Bật nhắc các lịch sắp tới">
+              <BellRing size={18} />
+            </button>
+            <button className="icon-button" type="button" onClick={addTask} title="Thêm phiên học"><Plus size={18} /></button>
+          </div>
         </div>
-        <div className="schedule-actions">
-          <button className="icon-button" type="button" onClick={onScheduleAllReminders} title="Bật nhắc các lịch sắp tới">
-            <BellRing size={18} />
-          </button>
-          <button className="icon-button" type="button" onClick={addTask} title="Thêm phiên học"><Plus size={18} /></button>
-        </div>
-      </div>
-      {reminderStatus?.message && (
-        <div className={`reminder-status ${reminderStatus.source}`}>
-          <BellRing size={16} />
-          <span>{reminderStatus.message}</span>
-        </div>
-      )}
-      <div className="task-grid">
-        {tasks.map((task, index) => {
-          const isEditing = editingIndex === index;
+        {reminderStatus?.message && (
+          <div className={`reminder-status ${reminderStatus.source}`}>
+            <BellRing size={16} />
+            <span>{reminderStatus.message}</span>
+          </div>
+        )}
+        <div className="task-grid">
+          {tasks.map((task, index) => {
+            const isEditing = editingIndex === index;
 
-          return (
-            <article className={`task-card ${task.done ? "is-done" : ""} ${isEditing ? "is-editing" : ""}`} key={`${task.title}-${index}`}>
-              {isEditing ? (
-                <div className="task-edit-form">
-                  <div className="task-edit-row">
+            return (
+              <article className={`task-card ${task.done ? "is-done" : ""} ${isEditing ? "is-editing" : ""}`} key={`${task.title}-${index}`}>
+                {isEditing ? (
+                  <div className="task-edit-form">
+                    <div className="task-edit-row">
+                      <label>
+                        Ngày
+                        <input value={draft.day} onChange={(event) => setDraft({ ...draft, day: event.target.value })} />
+                      </label>
+                      <label>
+                        Giờ
+                        <input type="time" value={draft.block} onChange={(event) => setDraft({ ...draft, block: event.target.value })} />
+                      </label>
+                    </div>
                     <label>
-                      Ngày
-                      <input value={draft.day} onChange={(event) => setDraft({ ...draft, day: event.target.value })} />
+                      Nội dung
+                      <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
                     </label>
-                    <label>
-                      Giờ
-                      <input type="time" value={draft.block} onChange={(event) => setDraft({ ...draft, block: event.target.value })} />
-                    </label>
+                    <div className="task-edit-row">
+                      <label>
+                        Chế độ
+                        <input value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value })} />
+                      </label>
+                      <label>
+                        Phút
+                        <input
+                          type="number"
+                          min="1"
+                          max="480"
+                          value={draft.minutes}
+                          onChange={(event) => setDraft({ ...draft, minutes: event.target.value })}
+                        />
+                      </label>
+                    </div>
+                    <div className="task-actions">
+                      <button className="mini-action primary-mini" type="button" onClick={saveEdit} title="Lưu lịch học">
+                        <Save size={16} />
+                        Lưu
+                      </button>
+                      <button className="mini-action" type="button" onClick={cancelEdit} title="Hủy chỉnh sửa">
+                        <X size={16} />
+                        Hủy
+                      </button>
+                    </div>
                   </div>
-                  <label>
-                    Nội dung
-                    <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} />
-                  </label>
-                  <div className="task-edit-row">
-                    <label>
-                      Chế độ
-                      <input value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value })} />
-                    </label>
-                    <label>
-                      Phút
-                      <input
-                        type="number"
-                        min="1"
-                        max="480"
-                        value={draft.minutes}
-                        onChange={(event) => setDraft({ ...draft, minutes: event.target.value })}
-                      />
-                    </label>
-                  </div>
-                  <div className="task-actions">
-                    <button className="mini-action primary-mini" type="button" onClick={saveEdit} title="Lưu lịch học">
-                      <Save size={16} />
-                      Lưu
+                ) : (
+                  <>
+                    <button className="check-button" type="button" onClick={() => toggleTask(tasks, setTasks, index)} title="Đổi trạng thái">
+                      <CheckCircle2 size={20} />
                     </button>
-                    <button className="mini-action" type="button" onClick={cancelEdit} title="Hủy chỉnh sửa">
-                      <X size={16} />
-                      Hủy
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <button className="check-button" type="button" onClick={() => toggleTask(tasks, setTasks, index)} title="Đổi trạng thái">
-                    <CheckCircle2 size={20} />
-                  </button>
-                  <span>{task.day} · {task.block}</span>
-                  <strong>{task.title}</strong>
-                  <p>{task.mode} · {task.minutes} phút</p>
-                  <div className="task-actions">
-                    <button className="mini-action" type="button" onClick={() => onScheduleReminder(task, index)} title="Đặt nhắc lịch này">
-                      <BellRing size={16} />
-                      Nhắc
-                    </button>
-                    <button className="mini-action" type="button" onClick={() => startEdit(task, index)} title="Sửa lịch học">
-                      <Edit3 size={16} />
-                      Sửa
-                    </button>
-                    <button className="mini-action danger-mini" type="button" onClick={() => deleteTask(index)} title="Xóa lịch học">
-                      <Trash2 size={16} />
-                      Xóa
-                    </button>
-                  </div>
-                </>
-              )}
-            </article>
-          );
-        })}
+                    <span>{task.day} · {task.block}</span>
+                    <strong>{task.title}</strong>
+                    <p>{task.mode} · {task.minutes} phút</p>
+                    <div className="task-actions">
+                      <button className="mini-action" type="button" onClick={() => onScheduleReminder(task, index)} title="Đặt nhắc lịch này">
+                        <BellRing size={16} />
+                        Nhắc
+                      </button>
+                      <button className="mini-action" type="button" onClick={() => startEdit(task, index)} title="Sửa lịch học">
+                        <Edit3 size={16} />
+                        Sửa
+                      </button>
+                      <button className="mini-action danger-mini" type="button" onClick={() => deleteTask(index)} title="Xóa lịch học">
+                        <Trash2 size={16} />
+                        Xóa
+                      </button>
+                    </div>
+                  </>
+                )}
+              </article>
+            );
+          })}
+        </div>
       </div>
+
+      <DeadlineBoard
+        deadlines={deadlines}
+        setDeadlines={setDeadlines}
+        onScheduleDeadlineReminder={onScheduleDeadlineReminder}
+        onScheduleAllDeadlineReminders={onScheduleAllDeadlineReminders}
+        onCreateDeadlineTask={onCreateDeadlineTask}
+      />
     </section>
   );
 }
 
-function Focus({ minutes, setMinutes, running, setRunning, apps, usageStatus, onRefreshUsage, onOpenUsageSettings }) {
+function DeadlineBoard({
+  deadlines,
+  setDeadlines,
+  onScheduleDeadlineReminder,
+  onScheduleAllDeadlineReminders,
+  onCreateDeadlineTask
+}) {
+  const [showForm, setShowForm] = useState(false);
+  const [draft, setDraft] = useState(() => makeEmptyDeadlineDraft());
+  const activeDeadlines = deadlines.filter((deadline) => !deadline.done);
+  const doneDeadlines = deadlines.filter((deadline) => deadline.done);
+
+  const addDeadline = () => {
+    const title = draft.title.trim();
+    if (!title) return;
+
+    const nextDeadline = normalizeDeadline({
+      ...draft,
+      id: Date.now(),
+      title,
+      subject: draft.subject.trim() || "Môn học",
+      note: draft.note.trim(),
+      done: false
+    });
+
+    setDeadlines(sortDeadlines([nextDeadline, ...deadlines]));
+    setDraft(makeEmptyDeadlineDraft());
+    setShowForm(false);
+  };
+
+  const updateDeadline = (deadlineId, patch) => {
+    setDeadlines(sortDeadlines(deadlines.map((deadline) => (
+      deadline.id === deadlineId ? normalizeDeadline({ ...deadline, ...patch }) : deadline
+    ))));
+  };
+
+  const deleteDeadline = (deadlineId) => {
+    setDeadlines(deadlines.filter((deadline) => deadline.id !== deadlineId));
+  };
+
+  return (
+    <div className="panel deadline-panel">
+      <div className="panel-title spread">
+        <div>
+          <AlarmClock size={20} />
+          <h2>Deadline ngắn hạn/dài hạn</h2>
+        </div>
+        <div className="schedule-actions">
+          <button className="icon-button" type="button" onClick={onScheduleAllDeadlineReminders} title="Bật nhắc deadline">
+            <BellRing size={18} />
+          </button>
+          <button className="icon-button" type="button" onClick={() => setShowForm(!showForm)} title="Thêm deadline">
+            <Plus size={18} />
+          </button>
+        </div>
+      </div>
+
+      <div className="deadline-summary">
+        <span>{activeDeadlines.length} đang mở</span>
+        <span>{doneDeadlines.length} đã xong</span>
+      </div>
+
+      {showForm && (
+        <div className="deadline-form">
+          <label>
+            Tên deadline
+            <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Ví dụ: Kiểm tra chương 2" />
+          </label>
+          <label>
+            Môn học
+            <input value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} />
+          </label>
+          <div className="deadline-form-row">
+            <label>
+              Ngày hạn
+              <input type="date" value={draft.dueDate} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} />
+            </label>
+            <label>
+              Giờ
+              <input type="time" value={draft.dueTime} onChange={(event) => setDraft({ ...draft, dueTime: event.target.value })} />
+            </label>
+          </div>
+          <div className="deadline-form-row">
+            <label>
+              Loại
+              <select value={draft.scope} onChange={(event) => setDraft({ ...draft, scope: event.target.value })}>
+                <option value="short">Ngắn hạn</option>
+                <option value="long">Dài hạn</option>
+              </select>
+            </label>
+            <label>
+              Ưu tiên
+              <select value={draft.priority} onChange={(event) => setDraft({ ...draft, priority: event.target.value })}>
+                <option value="high">Cao</option>
+                <option value="medium">Vừa</option>
+                <option value="low">Thấp</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            Nhắc trước
+            <select value={draft.reminderLead} onChange={(event) => setDraft({ ...draft, reminderLead: Number(event.target.value) })}>
+              <option value={30}>30 phút</option>
+              <option value={60}>1 giờ</option>
+              <option value={360}>6 giờ</option>
+              <option value={1440}>1 ngày</option>
+              <option value={2880}>2 ngày</option>
+            </select>
+          </label>
+          <label>
+            Ghi chú
+            <textarea value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} placeholder="Chốt phần cần làm trước hạn..." />
+          </label>
+          <button className="primary-action" type="button" onClick={addDeadline}>
+            <Save size={18} />
+            Lưu deadline
+          </button>
+        </div>
+      )}
+
+      <div className="deadline-list">
+        {deadlines.length === 0 && (
+          <p className="empty-state">Chưa có deadline nào. Thêm mốc ngắn hạn hoặc dài hạn để AI/lịch học bám sát mục tiêu hơn.</p>
+        )}
+        {deadlines.map((deadline, index) => (
+          <article className={`deadline-card ${deadline.done ? "is-done" : ""} priority-${deadline.priority}`} key={deadline.id}>
+            <header>
+              <div>
+                <strong>{deadline.title}</strong>
+                <p>{deadline.subject} · {formatDeadlineDue(deadline)}</p>
+              </div>
+              <span>{deadlineDaysLeft(deadline)}</span>
+            </header>
+            <div className="deadline-tags">
+              <i>{deadlineScopeLabel(deadline.scope)}</i>
+              <i>{deadlinePriorityLabel(deadline.priority)}</i>
+              <i>Nhắc trước {formatLeadMinutes(deadline.reminderLead)}</i>
+            </div>
+            {deadline.note && <p>{deadline.note}</p>}
+            <div className="task-actions">
+              <button className="mini-action" type="button" onClick={() => onScheduleDeadlineReminder(deadline, index)} title="Đặt nhắc deadline">
+                <BellRing size={16} />
+                Nhắc
+              </button>
+              <button className="mini-action primary-mini" type="button" onClick={() => onCreateDeadlineTask(deadline)} title="Tạo phiên học từ deadline">
+                <Plus size={16} />
+                Tạo phiên
+              </button>
+              <button className="mini-action" type="button" onClick={() => updateDeadline(deadline.id, { done: !deadline.done })} title="Đổi trạng thái deadline">
+                <CheckCircle2 size={16} />
+                {deadline.done ? "Mở lại" : "Xong"}
+              </button>
+              <button className="mini-action danger-mini" type="button" onClick={() => deleteDeadline(deadline.id)} title="Xóa deadline">
+                <Trash2 size={16} />
+                Xóa
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Focus({
+  goal,
+  tasks,
+  deadlines,
+  minutes,
+  setMinutes,
+  running,
+  setRunning,
+  focusSession,
+  setFocusSession,
+  focusSessions,
+  onCompleteFocusSession,
+  apps,
+  usageStatus,
+  studyRhythm,
+  setStudyRhythm,
+  rhythmPlan,
+  onScheduleRhythmReminders,
+  onRefreshUsage,
+  onOpenUsageSettings
+}) {
+  const [customFocusMinutes, setCustomFocusMinutes] = useState(Math.max(1, Math.round(minutes / 60)));
+  const [focusAnchor, setFocusAnchor] = useState("goal");
+  const [focusNote, setFocusNote] = useState("");
+  const focusAnchorOptions = useMemo(
+    () => buildFocusAnchorOptions({ goal, tasks, deadlines }),
+    [goal, tasks, deadlines]
+  );
   const display = `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+  const applyFocusMinutes = (value) => {
+    const nextMinutes = Math.max(1, Math.min(240, Number(value) || 25));
+    setRunning(false);
+    setMinutes(nextMinutes * 60);
+    setCustomFocusMinutes(nextMinutes);
+    setFocusSession((current) => current
+      ? { ...current, plannedSeconds: nextMinutes * 60, plannedMinutes: nextMinutes }
+      : current
+    );
+  };
+  const toggleFocus = () => {
+    if (running) {
+      setRunning(false);
+      return;
+    }
+
+    if (!focusSession) {
+      const anchor = resolveFocusAnchor(focusAnchor, focusAnchorOptions);
+      const clientId = String(Date.now());
+      setFocusSession({
+        id: Number(clientId),
+        clientId,
+        subject: anchor.subject,
+        anchorType: anchor.type,
+        anchorLabel: anchor.label,
+        plannedSeconds: minutes,
+        plannedMinutes: Math.max(1, Math.round(minutes / 60)),
+      startedAt: new Date().toISOString()
+      });
+    }
+
+    setRunning(true);
+  };
+  const completeFocusSession = () => {
+    if (!focusSession) return;
+
+    const plannedSeconds = Math.max(60, Number(focusSession.plannedSeconds || focusSession.plannedMinutes * 60 || 25 * 60));
+    const actualSeconds = Math.max(60, Math.min(plannedSeconds, plannedSeconds - Math.max(0, minutes)));
+    const completedSession = {
+      ...focusSession,
+      actualSeconds,
+      actualMinutes: Math.max(1, Math.round(actualSeconds / 60)),
+      note: focusNote.trim(),
+      endedAt: new Date().toISOString()
+    };
+
+    onCompleteFocusSession(completedSession);
+    setFocusSession(null);
+    setRunning(false);
+    setFocusNote("");
+    setMinutes(plannedSeconds);
+    setCustomFocusMinutes(Math.max(1, Math.round(plannedSeconds / 60)));
+  };
+  const cancelFocusSession = () => {
+    setFocusSession(null);
+    setRunning(false);
+    setFocusNote("");
+  };
 
   return (
     <section className="focus-grid">
@@ -1461,19 +2167,83 @@ function Focus({ minutes, setMinutes, running, setRunning, apps, usageStatus, on
         <div className="timer">{display}</div>
         <div className="segmented">
           {[25, 45, 60].map((value) => (
-            <button key={value} onClick={() => setMinutes(value * 60)}>{value}p</button>
+            <button key={value} onClick={() => applyFocusMinutes(value)}>{value}p</button>
           ))}
         </div>
+        <div className="custom-focus">
+          <label>
+            <span>Thời gian tùy chọn</span>
+            <input
+              type="number"
+              min="1"
+              max="240"
+              value={customFocusMinutes}
+              onChange={(event) => setCustomFocusMinutes(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") applyFocusMinutes(customFocusMinutes);
+              }}
+            />
+          </label>
+          <button className="text-action" type="button" onClick={() => applyFocusMinutes(customFocusMinutes)}>
+            Áp dụng
+          </button>
+        </div>
+        <div className="focus-session">
+          <label className="focus-session-select">
+            <span>Bám theo phiên</span>
+            <select value={focusAnchor} onChange={(event) => setFocusAnchor(event.target.value)} disabled={Boolean(focusSession)}>
+              {focusAnchorOptions.map((option) => (
+                <option value={option.value} key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+
+          {focusSession && (
+            <div className="active-session">
+              <span>Đang học</span>
+              <strong>{focusSession.anchorLabel}</strong>
+              <p>{focusSession.subject} · bắt đầu {formatSessionTime(focusSession.startedAt)}</p>
+            </div>
+          )}
+
+          {focusSession && (
+            <textarea
+              value={focusNote}
+              onChange={(event) => setFocusNote(event.target.value)}
+              placeholder="Chốt nhanh: đã học gì, còn kẹt gì?"
+            />
+          )}
+        </div>
         <div className="timer-actions">
-          <button className="primary-action" onClick={() => setRunning(!running)}>
+          <button className="primary-action" onClick={toggleFocus}>
             {running ? <Pause size={18} /> : <Play size={18} />}
             {running ? "Tạm dừng" : "Bắt đầu"}
           </button>
-          <button className="icon-button" onClick={() => { setRunning(false); setMinutes(25 * 60); }} title="Đặt lại">
+          <button className="icon-button" onClick={() => applyFocusMinutes(25)} title="Đặt lại">
             <RefreshCw size={18} />
           </button>
         </div>
+        {focusSession && (
+          <div className="focus-session-actions">
+            <button className="text-action" type="button" onClick={completeFocusSession}>
+              <CheckCircle2 size={18} />
+              Hoàn thành phiên
+            </button>
+            <button className="mini-action danger-mini" type="button" onClick={cancelFocusSession}>
+              <X size={16} />
+              Hủy
+            </button>
+          </div>
+        )}
       </div>
+
+      <StudyRhythmPanel
+        studyRhythm={studyRhythm}
+        setStudyRhythm={setStudyRhythm}
+        rhythmPlan={rhythmPlan}
+        onScheduleRhythmReminders={onScheduleRhythmReminders}
+        onApplyMinutes={applyFocusMinutes}
+      />
 
       <div className="panel app-usage">
         <div className="panel-title spread">
@@ -1505,7 +2275,123 @@ function Focus({ minutes, setMinutes, running, setRunning, apps, usageStatus, on
           <p className="empty-state">Chưa có app nào trong cửa sổ 24 giờ gần đây.</p>
         )}
       </div>
+
+      <div className="panel session-history">
+        <div className="panel-title">
+          <BookOpenCheck size={20} />
+          <h2>Phiên học gần đây</h2>
+        </div>
+        {focusSessions.length === 0 && (
+          <p className="empty-state">Chưa có phiên Focus nào được chốt. Bắt đầu và hoàn thành một phiên để lưu lịch sử học thật.</p>
+        )}
+        {focusSessions.slice(0, 6).map((session) => (
+          <article className="session-row" key={session.id}>
+            <span>{formatUsageMinutes(session.actualMinutes)}</span>
+            <div>
+              <strong>{session.anchorLabel}</strong>
+              <p>{session.subject} · {formatSessionTime(session.endedAt)}</p>
+              {session.note && <p className="session-note">{session.note}</p>}
+            </div>
+          </article>
+        ))}
+      </div>
     </section>
+  );
+}
+
+function StudyRhythmPanel({ studyRhythm, setStudyRhythm, rhythmPlan, onScheduleRhythmReminders, onApplyMinutes }) {
+  const updateRhythm = (patch) => {
+    const nextRhythm = normalizeStudyRhythm({ ...studyRhythm, ...patch });
+    setStudyRhythm(nextRhythm);
+    if (patch.studyMinutes) onApplyMinutes?.(nextRhythm.studyMinutes);
+  };
+
+  const choosePreset = (preset) => {
+    updateRhythm(preset);
+  };
+
+  return (
+    <div className="panel rhythm-panel">
+      <div className="panel-title spread">
+        <div>
+          <BellRing size={20} />
+          <h2>Nhịp học hôm nay</h2>
+        </div>
+        <button className="icon-button" type="button" onClick={onScheduleRhythmReminders} title="Đặt nhắc học/nghỉ">
+          <BellRing size={18} />
+        </button>
+      </div>
+
+      <div className="rhythm-presets">
+        {rhythmPresets.map((preset) => (
+          <button
+            className={studyRhythm.preset === preset.preset ? "active" : ""}
+            type="button"
+            key={preset.preset}
+            onClick={() => choosePreset(preset)}
+          >
+            {preset.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="rhythm-controls">
+        <label>
+          Học
+          <input
+            type="number"
+            min="5"
+            max="120"
+            value={studyRhythm.studyMinutes}
+            onChange={(event) => updateRhythm({ preset: "custom", studyMinutes: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          Nghỉ
+          <input
+            type="number"
+            min="3"
+            max="45"
+            value={studyRhythm.breakMinutes}
+            onChange={(event) => updateRhythm({ preset: "custom", breakMinutes: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          Chốt
+          <input
+            type="number"
+            min="3"
+            max="30"
+            value={studyRhythm.reviewMinutes}
+            onChange={(event) => updateRhythm({ preset: "custom", reviewMinutes: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          Giải trí
+          <input
+            type="number"
+            min="0"
+            max="180"
+            value={studyRhythm.relaxLimitMinutes}
+            onChange={(event) => updateRhythm({ preset: "custom", relaxLimitMinutes: Number(event.target.value) })}
+          />
+        </label>
+      </div>
+
+      <div className="rhythm-plan">
+        {rhythmPlan.blocks.map((block) => (
+          <article key={block.label}>
+            <span>{block.minutes}p</span>
+            <div>
+              <strong>{block.label}</strong>
+              <p>{block.detail}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      {rhythmPlan.warning && <p className="rhythm-warning">{rhythmPlan.warning}</p>}
+    </div>
   );
 }
 
@@ -2386,6 +3272,261 @@ function NavButton({ icon: Icon, label, active, onClick }) {
   );
 }
 
+function getIsoDateOffset(days = 0) {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function makeEmptyDeadlineDraft() {
+  return {
+    title: "",
+    subject: "Toán 11",
+    dueDate: getIsoDateOffset(7),
+    dueTime: "20:00",
+    scope: "short",
+    priority: "medium",
+    reminderLead: 1440,
+    note: ""
+  };
+}
+
+function normalizeDeadline(deadline = {}) {
+  return {
+    id: Number(deadline.id || Date.now()),
+    title: String(deadline.title || "Deadline học tập").trim().slice(0, 120),
+    subject: String(deadline.subject || "Môn học").trim().slice(0, 80),
+    dueDate: String(deadline.dueDate || getIsoDateOffset(7)).slice(0, 10),
+    dueTime: String(deadline.dueTime || "20:00").slice(0, 5),
+    scope: deadline.scope === "long" ? "long" : "short",
+    priority: ["high", "medium", "low"].includes(deadline.priority) ? deadline.priority : "medium",
+    reminderLead: Math.max(0, Math.min(10_080, Number(deadline.reminderLead || 1440))),
+    note: String(deadline.note || "").trim().slice(0, 320),
+    done: Boolean(deadline.done)
+  };
+}
+
+function sortDeadlines(deadlines = []) {
+  return [...deadlines]
+    .map(normalizeDeadline)
+    .sort((left, right) => {
+      if (left.done !== right.done) return left.done ? 1 : -1;
+      return getDeadlineTimestamp(left) - getDeadlineTimestamp(right);
+    });
+}
+
+function getDeadlineTimestamp(deadline) {
+  const date = getDeadlineDueDate(deadline);
+  return date ? date.getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+function getDeadlineDueDate(deadline = {}) {
+  const dueDate = String(deadline.dueDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return null;
+
+  const time = parseTaskTime(deadline.dueTime || "20:00") || { hours: 20, minutes: 0 };
+  const date = new Date(`${dueDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+
+  date.setHours(time.hours, time.minutes, 0, 0);
+  return date;
+}
+
+function getDeadlineReminderDate(deadline, now = new Date()) {
+  const dueAt = getDeadlineDueDate(deadline);
+  if (!dueAt || dueAt <= now) return null;
+
+  const reminderAt = new Date(dueAt.getTime() - Number(deadline.reminderLead || 0) * 60_000);
+  return reminderAt > now ? reminderAt : dueAt;
+}
+
+function makeDeadlineReminderId(deadline, index = 0) {
+  const numericId = Number(deadline.id);
+  const source = Number.isFinite(numericId) ? numericId : index + 1;
+  return DEADLINE_REMINDER_ID_BASE + (Math.abs(Math.trunc(source)) % 20_000);
+}
+
+function makeRhythmReminderItems(studyRhythm) {
+  const rhythm = normalizeStudyRhythm(studyRhythm);
+  const now = new Date();
+  const studyEnd = new Date(now.getTime() + rhythm.studyMinutes * 60_000);
+  const breakEnd = new Date(studyEnd.getTime() + rhythm.breakMinutes * 60_000);
+  const reviewEnd = new Date(breakEnd.getTime() + rhythm.reviewMinutes * 60_000);
+
+  return [
+    {
+      id: RHYTHM_REMINDER_ID_BASE + 1,
+      step: "break",
+      at: studyEnd,
+      title: "Đến nhịp nghỉ",
+      body: `Đã học ${rhythm.studyMinutes} phút. Nghỉ ${rhythm.breakMinutes} phút, đứng dậy và tránh mở app giải trí dài.`
+    },
+    {
+      id: RHYTHM_REMINDER_ID_BASE + 2,
+      step: "resume",
+      at: breakEnd,
+      title: "Quay lại phiên học",
+      body: `Hết ${rhythm.breakMinutes} phút nghỉ. Vào lại bài chính hoặc deadline gần nhất.`
+    },
+    {
+      id: RHYTHM_REMINDER_ID_BASE + 3,
+      step: "review",
+      at: reviewEnd,
+      title: "Chốt phiên học",
+      body: `Dành ${rhythm.reviewMinutes} phút ghi lỗi sai, tick lịch và đặt việc tiếp theo.`
+    }
+  ];
+}
+
+function normalizeStudyRhythm(rhythm = {}) {
+  return {
+    preset: String(rhythm.preset || "deep"),
+    studyMinutes: Math.max(5, Math.min(120, Number(rhythm.studyMinutes || 45))),
+    breakMinutes: Math.max(3, Math.min(45, Number(rhythm.breakMinutes || 10))),
+    reviewMinutes: Math.max(3, Math.min(30, Number(rhythm.reviewMinutes || 8))),
+    relaxLimitMinutes: Math.max(0, Math.min(180, Number(rhythm.relaxLimitMinutes || 30)))
+  };
+}
+
+function summarizeDeadlines(deadlines = []) {
+  const upcoming = sortDeadlines(deadlines).filter((deadline) => !deadline.done);
+  const next = upcoming[0];
+  if (!next) {
+    return { label: "0 mốc", note: "Không có deadline đang mở." };
+  }
+
+  const urgentCount = upcoming.filter((deadline) => {
+    const dueAt = getDeadlineDueDate(deadline);
+    return dueAt && dueAt.getTime() - Date.now() <= 3 * 24 * 60 * 60 * 1000;
+  }).length;
+
+  return {
+    label: deadlineDaysLeft(next),
+    note: `${next.title} · ${urgentCount} mốc trong 3 ngày tới`
+  };
+}
+
+function deadlineDaysLeft(deadline) {
+  const dueAt = getDeadlineDueDate(deadline);
+  if (!dueAt) return "Chưa rõ";
+
+  const diffMs = dueAt.getTime() - Date.now();
+  if (diffMs < 0) return "Quá hạn";
+
+  const diffHours = Math.ceil(diffMs / 3_600_000);
+  if (diffHours < 24) return `${diffHours}h`;
+  return `${Math.ceil(diffHours / 24)} ngày`;
+}
+
+function formatDeadlineDue(deadline) {
+  const dueAt = getDeadlineDueDate(deadline);
+  if (!dueAt) return "Chưa có hạn";
+  return dueAt.toLocaleString("vi-VN", {
+    weekday: "short",
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function deadlineScopeLabel(scope) {
+  return scope === "long" ? "Dài hạn" : "Ngắn hạn";
+}
+
+function deadlinePriorityLabel(priority) {
+  const labels = {
+    high: "Ưu tiên cao",
+    medium: "Ưu tiên vừa",
+    low: "Ưu tiên thấp"
+  };
+  return labels[priority] || labels.medium;
+}
+
+function formatLeadMinutes(minutes) {
+  const value = Number(minutes || 0);
+  if (value < 60) return `${value} phút`;
+  if (value < 1440) return `${Math.round(value / 60)} giờ`;
+  return `${Math.round(value / 1440)} ngày`;
+}
+
+function getStudyBlockBeforeDeadline(dueAt) {
+  const date = new Date(dueAt);
+  date.setMinutes(0, 0, 0);
+  date.setHours(Math.max(6, date.getHours() - 2));
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function getDeadlineTaskDay(deadline, now = new Date()) {
+  const dueAt = getDeadlineDueDate(deadline);
+  if (!dueAt) return "Hôm nay";
+
+  const startToday = new Date(now);
+  startToday.setHours(0, 0, 0, 0);
+  const startDue = new Date(dueAt);
+  startDue.setHours(0, 0, 0, 0);
+  const diffDays = Math.round((startDue - startToday) / 86_400_000);
+
+  if (diffDays <= 0) return "Hôm nay";
+  if (diffDays === 1) return "Ngày mai";
+  return dueAt.toLocaleDateString("vi-VN", { weekday: "short", day: "2-digit", month: "2-digit" });
+}
+
+function buildRhythmPlan({ tasks = [], deadlines = [], studyRhythm = defaultStudyRhythm, apps = [] }) {
+  const rhythm = normalizeStudyRhythm(studyRhythm);
+  const nextTask = tasks.find((task) => !task.done);
+  const nextDeadline = sortDeadlines(deadlines).find((deadline) => !deadline.done);
+  const distractionMinutes = apps
+    .filter((app) => isDistractingApp(app))
+    .reduce((sum, app) => sum + Number(app.minutes || 0), 0);
+  const overRelax = Math.max(0, distractionMinutes - rhythm.relaxLimitMinutes);
+  const anchor = nextDeadline
+    ? `bám deadline "${nextDeadline.title}"`
+    : nextTask
+      ? `bám phiên "${nextTask.title}"`
+      : "chọn một bài quan trọng nhất";
+
+  return {
+    blocks: [
+      {
+        label: "Học sâu",
+        minutes: rhythm.studyMinutes,
+        detail: `Tắt nhiễu và ${anchor}.`
+      },
+      {
+        label: "Nghỉ sinh học",
+        minutes: rhythm.breakMinutes,
+        detail: "Rời màn hình, uống nước, đi lại nhẹ; chưa mở feed/video ngắn."
+      },
+      {
+        label: "Chốt phiên",
+        minutes: rhythm.reviewMinutes,
+        detail: "Tick lịch, ghi lỗi sai chính và tạo bước tiếp theo nếu còn deadline."
+      },
+      {
+        label: "Giải trí kiểm soát",
+        minutes: rhythm.relaxLimitMinutes,
+        detail: "Giữ giải trí trong giới hạn rồi quay lại chu kỳ học."
+      }
+    ],
+    warning: overRelax
+      ? `App giải trí đang vượt giới hạn khoảng ${overRelax} phút. Nên giảm trước khi bắt đầu chu kỳ tiếp theo.`
+      : "Nhịp hiện tại ổn: học, nghỉ, chốt lại rồi mới giải trí ngắn."
+  };
+}
+
+function isDistractingApp(app = {}) {
+  const name = `${app.name || ""} ${app.packageName || ""} ${app.type || ""} ${app.effect || ""}`.toLocaleLowerCase("vi-VN");
+  return name.includes("tiktok") ||
+    name.includes("youtube") ||
+    name.includes("instagram") ||
+    name.includes("facebook") ||
+    name.includes("giải trí") ||
+    name.includes("lệch mục tiêu") ||
+    name.includes("cần kiểm soát");
+}
+
 function makePlan(goal) {
   const hours = Number(goal.hoursPerDay) || 1;
   return [
@@ -2568,6 +3709,90 @@ function save(key, value) {
   } catch {
     console.warn(`Cannot save ${key} to localStorage. The payload may be too large.`);
   }
+}
+
+function buildFocusAnchorOptions({ goal, tasks = [], deadlines = [] }) {
+  const options = [
+    {
+      value: "goal",
+      type: "goal",
+      label: goal?.subject || "Mục tiêu hiện tại",
+      subject: goal?.subject || "Môn học"
+    }
+  ];
+
+  tasks
+    .map((task, index) => ({ task, index }))
+    .filter(({ task }) => !task.done)
+    .slice(0, 8)
+    .forEach(({ task, index }) => {
+      options.push({
+        value: `task:${index}`,
+        type: "task",
+        label: task.title,
+        subject: task.mode || goal?.subject || "Môn học"
+      });
+    });
+
+  deadlines
+    .filter((deadline) => !deadline.done)
+    .slice(0, 8)
+    .forEach((deadline) => {
+      options.push({
+        value: `deadline:${deadline.id}`,
+        type: "deadline",
+        label: deadline.title,
+        subject: deadline.subject || goal?.subject || "Môn học"
+      });
+    });
+
+  return options;
+}
+
+function mergeFocusSessionState(incoming = [], current = []) {
+  const byKey = new Map();
+
+  [...incoming, ...current].forEach((session) => {
+    if (!session) return;
+    const key = focusSessionKey(session);
+    if (!key || byKey.has(key)) return;
+    byKey.set(key, {
+      ...session,
+      clientId: String(session.clientId || session.id || key)
+    });
+  });
+
+  return [...byKey.values()]
+    .sort((left, right) => getSessionTimestamp(right) - getSessionTimestamp(left))
+    .slice(0, 120);
+}
+
+function focusSessionKey(session = {}) {
+  return String(session.clientId || session.id || `${session.startedAt || ""}:${session.anchorLabel || ""}`);
+}
+
+function getSessionTimestamp(session = {}) {
+  const parsed = Date.parse(session.endedAt || session.startedAt || "");
+  return Number.isFinite(parsed) ? parsed : Number(session.id || 0);
+}
+
+function resolveFocusAnchor(value, options = []) {
+  return options.find((option) => option.value === value) || options[0] || {
+    type: "custom",
+    label: "Phiên học tự do",
+    subject: "Môn học"
+  };
+}
+
+function formatSessionTime(value) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "chưa rõ";
+  return new Date(parsed).toLocaleString("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
 }
 
 function formatUsageMinutes(value) {

@@ -69,6 +69,18 @@ app.post("/api/auth/register", async (request, response) => {
     );
     const created = normalizeUser(result.rows[0]);
     await upsertGoal(created.id, sanitizeGoal(request.body?.goal));
+    if (Array.isArray(request.body?.tasks)) {
+      await replaceTasks(created.id, request.body.tasks.slice(0, 100).map(sanitizeTask));
+    }
+    if (Array.isArray(request.body?.deadlines)) {
+      await replaceDeadlines(created.id, request.body.deadlines.slice(0, 100).map(sanitizeDeadline));
+    }
+    if (request.body?.studyRhythm) {
+      await upsertStudyRhythm(created.id, sanitizeStudyRhythm(request.body.studyRhythm));
+    }
+    if (Array.isArray(request.body?.focusSessions)) {
+      await replaceFocusSessions(created.id, request.body.focusSessions.slice(0, 120).map(sanitizeFocusSession));
+    }
     response.status(201).json({ user: created, state: await getStudyState(created.id) });
   } catch (error) {
     if (error.code === "23505") {
@@ -147,6 +159,65 @@ app.put("/api/users/:userId/tasks", async (request, response) => {
     response.json({ tasks: saved });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot save tasks." });
+  }
+});
+
+app.put("/api/users/:userId/deadlines", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const userId = Number(request.params.userId);
+  if (!Number.isFinite(userId)) return response.status(400).json({ error: "Invalid user id." });
+
+  const deadlines = Array.isArray(request.body?.deadlines)
+    ? request.body.deadlines.slice(0, 100).map(sanitizeDeadline)
+    : [];
+
+  try {
+    const saved = await replaceDeadlines(userId, deadlines);
+    response.json({ deadlines: saved });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot save deadlines." });
+  }
+});
+
+app.put("/api/users/:userId/study-rhythm", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const userId = Number(request.params.userId);
+  if (!Number.isFinite(userId)) return response.status(400).json({ error: "Invalid user id." });
+
+  try {
+    const studyRhythm = await upsertStudyRhythm(userId, sanitizeStudyRhythm(request.body?.studyRhythm));
+    response.json({ studyRhythm });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot save study rhythm." });
+  }
+});
+
+app.get("/api/users/:userId/focus-sessions", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const userId = Number(request.params.userId);
+  if (!Number.isFinite(userId)) return response.status(400).json({ error: "Invalid user id." });
+
+  try {
+    response.json({ focusSessions: await listFocusSessions(userId) });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot load focus sessions." });
+  }
+});
+
+app.post("/api/users/:userId/focus-sessions", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const userId = Number(request.params.userId);
+  if (!Number.isFinite(userId)) return response.status(400).json({ error: "Invalid user id." });
+
+  try {
+    const session = await saveFocusSession(userId, sanitizeFocusSession(request.body?.session));
+    response.status(201).json({ session });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot save focus session." });
   }
 });
 
@@ -665,6 +736,55 @@ async function initDatabase() {
       completed_at timestamptz not null default now()
     );
 
+    create table if not exists study_deadlines (
+      id bigserial primary key,
+      user_id bigint references app_users(id) on delete cascade,
+      title text not null,
+      subject text not null,
+      due_date text not null default '',
+      due_time text not null default '20:00',
+      scope text not null default 'short',
+      priority text not null default 'medium',
+      reminder_lead integer not null default 1440,
+      note text not null default '',
+      done boolean not null default false,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+
+    create index if not exists study_deadlines_user_due_idx
+      on study_deadlines (user_id, due_date, due_time);
+
+    create table if not exists study_rhythm (
+      user_id bigint primary key references app_users(id) on delete cascade,
+      preset text not null default 'deep',
+      study_minutes integer not null default 45,
+      break_minutes integer not null default 10,
+      review_minutes integer not null default 8,
+      relax_limit_minutes integer not null default 30,
+      updated_at timestamptz not null default now()
+    );
+
+    create table if not exists focus_sessions (
+      id bigserial primary key,
+      user_id bigint references app_users(id) on delete cascade,
+      client_id text not null,
+      subject text not null,
+      anchor_type text not null default 'goal',
+      anchor_label text not null,
+      planned_minutes integer not null default 25,
+      actual_minutes integer not null default 1,
+      actual_seconds integer not null default 60,
+      note text not null default '',
+      started_at timestamptz not null default now(),
+      ended_at timestamptz not null default now(),
+      created_at timestamptz not null default now(),
+      unique (user_id, client_id)
+    );
+
+    create index if not exists focus_sessions_user_ended_idx
+      on focus_sessions (user_id, ended_at desc);
+
     create table if not exists social_posts (
       id bigserial primary key,
       user_id bigint references app_users(id) on delete set null,
@@ -737,7 +857,7 @@ async function saveAiEvent(type, request, response) {
 }
 
 async function getStudyState(userId) {
-  const [goalResult, tasksResult, userResult] = await Promise.all([
+  const [goalResult, tasksResult, deadlinesResult, rhythmResult, focusSessionsResult, userResult] = await Promise.all([
     pool.query(
       `select subject, target, exam_date, level, hours_per_day
        from study_goals
@@ -751,12 +871,47 @@ async function getStudyState(userId) {
        order by created_at asc, id asc`,
       [userId]
     ),
+    pool.query(
+      `select id, title, subject, due_date, due_time, scope, priority, reminder_lead, note, done
+       from study_deadlines
+       where user_id = $1
+       order by done asc, due_date asc, due_time asc, created_at asc, id asc`,
+      [userId]
+    ),
+    pool.query(
+      `select preset, study_minutes, break_minutes, review_minutes, relax_limit_minutes
+       from study_rhythm
+       where user_id = $1`,
+      [userId]
+    ),
+    pool.query(
+      `select
+         id,
+         client_id,
+         subject,
+         anchor_type,
+         anchor_label,
+         planned_minutes,
+         actual_minutes,
+         actual_seconds,
+         note,
+         started_at,
+         ended_at
+       from focus_sessions
+       where user_id = $1
+       order by ended_at desc, id desc
+       limit 120`,
+      [userId]
+    ),
     pool.query("select proof_count from app_users where id = $1", [userId])
   ]);
 
   return {
     goal: goalResult.rows[0] ? normalizeGoal(goalResult.rows[0]) : null,
     tasks: tasksResult.rows.map(normalizeTask),
+    deadlines: deadlinesResult.rows.map(normalizeDeadline),
+    studyRhythm: rhythmResult.rows[0] ? normalizeStudyRhythm(rhythmResult.rows[0]) : null,
+    focusSessions: focusSessionsResult.rows.map(normalizeFocusSession),
     proofs: Number(userResult.rows[0]?.proof_count || 0)
   };
 }
@@ -830,6 +985,188 @@ async function replaceTasks(userId, tasks) {
   } finally {
     client.release();
   }
+}
+
+async function replaceDeadlines(userId, deadlines) {
+  const existingResult = await pool.query(
+    `select id
+     from study_deadlines
+     where user_id = $1`,
+    [userId]
+  );
+  const existingIds = new Set(existingResult.rows.map((deadline) => Number(deadline.id)));
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("delete from study_deadlines where user_id = $1", [userId]);
+
+    const saved = [];
+    for (const deadline of deadlines) {
+      const values = [
+        userId,
+        deadline.title,
+        deadline.subject,
+        deadline.dueDate,
+        deadline.dueTime,
+        deadline.scope,
+        deadline.priority,
+        deadline.reminderLead,
+        deadline.note,
+        deadline.done
+      ];
+      const hasExistingId = existingIds.has(deadline.id);
+      const result = hasExistingId
+        ? await client.query(
+          `insert into study_deadlines (id, user_id, title, subject, due_date, due_time, scope, priority, reminder_lead, note, done)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           returning id, title, subject, due_date, due_time, scope, priority, reminder_lead, note, done`,
+          [deadline.id, ...values]
+        )
+        : await client.query(
+          `insert into study_deadlines (user_id, title, subject, due_date, due_time, scope, priority, reminder_lead, note, done)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           returning id, title, subject, due_date, due_time, scope, priority, reminder_lead, note, done`,
+          values
+        );
+
+      saved.push(normalizeDeadline(result.rows[0]));
+    }
+
+    await client.query("commit");
+    return saved;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function upsertStudyRhythm(userId, studyRhythm) {
+  const result = await pool.query(
+    `insert into study_rhythm (user_id, preset, study_minutes, break_minutes, review_minutes, relax_limit_minutes)
+     values ($1, $2, $3, $4, $5, $6)
+     on conflict (user_id) do update set
+       preset = excluded.preset,
+       study_minutes = excluded.study_minutes,
+       break_minutes = excluded.break_minutes,
+       review_minutes = excluded.review_minutes,
+       relax_limit_minutes = excluded.relax_limit_minutes,
+       updated_at = now()
+     returning preset, study_minutes, break_minutes, review_minutes, relax_limit_minutes`,
+    [
+      userId,
+      studyRhythm.preset,
+      studyRhythm.studyMinutes,
+      studyRhythm.breakMinutes,
+      studyRhythm.reviewMinutes,
+      studyRhythm.relaxLimitMinutes
+    ]
+  );
+
+  return normalizeStudyRhythm(result.rows[0]);
+}
+
+async function listFocusSessions(userId) {
+  const result = await pool.query(
+    `select
+       id,
+       client_id,
+       subject,
+       anchor_type,
+       anchor_label,
+       planned_minutes,
+       actual_minutes,
+       actual_seconds,
+       note,
+       started_at,
+       ended_at
+     from focus_sessions
+     where user_id = $1
+     order by ended_at desc, id desc
+     limit 120`,
+    [userId]
+  );
+
+  return result.rows.map(normalizeFocusSession);
+}
+
+async function replaceFocusSessions(userId, sessions) {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("delete from focus_sessions where user_id = $1", [userId]);
+
+    const saved = [];
+    for (const session of sessions) {
+      saved.push(await saveFocusSession(userId, session, client));
+    }
+
+    await client.query("commit");
+    return saved;
+  } catch (error) {
+    await client.query("rollback");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveFocusSession(userId, session, client = pool) {
+  const result = await client.query(
+    `insert into focus_sessions (
+       user_id,
+       client_id,
+       subject,
+       anchor_type,
+       anchor_label,
+       planned_minutes,
+       actual_minutes,
+       actual_seconds,
+       note,
+       started_at,
+       ended_at
+     )
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     on conflict (user_id, client_id) do update set
+       subject = excluded.subject,
+       anchor_type = excluded.anchor_type,
+       anchor_label = excluded.anchor_label,
+       planned_minutes = excluded.planned_minutes,
+       actual_minutes = excluded.actual_minutes,
+       actual_seconds = excluded.actual_seconds,
+       note = excluded.note,
+       started_at = excluded.started_at,
+       ended_at = excluded.ended_at
+     returning
+       id,
+       client_id,
+       subject,
+       anchor_type,
+       anchor_label,
+       planned_minutes,
+       actual_minutes,
+       actual_seconds,
+       note,
+       started_at,
+       ended_at`,
+    [
+      userId,
+      session.clientId,
+      session.subject,
+      session.anchorType,
+      session.anchorLabel,
+      session.plannedMinutes,
+      session.actualMinutes,
+      session.actualSeconds,
+      session.note,
+      session.startedAt,
+      session.endedAt
+    ]
+  );
+
+  return normalizeFocusSession(result.rows[0]);
 }
 
 async function seedDatabase() {
@@ -1041,6 +1378,49 @@ function normalizeTask(row) {
   };
 }
 
+function normalizeDeadline(row) {
+  return {
+    id: Number(row.id),
+    title: row.title,
+    subject: row.subject,
+    dueDate: row.due_date || "",
+    dueTime: row.due_time || "20:00",
+    scope: row.scope === "long" ? "long" : "short",
+    priority: ["high", "medium", "low"].includes(row.priority) ? row.priority : "medium",
+    reminderLead: Number(row.reminder_lead || 1440),
+    note: row.note || "",
+    done: Boolean(row.done)
+  };
+}
+
+function normalizeStudyRhythm(row) {
+  return {
+    preset: row.preset || "deep",
+    studyMinutes: Number(row.study_minutes || 45),
+    breakMinutes: Number(row.break_minutes || 10),
+    reviewMinutes: Number(row.review_minutes || 8),
+    relaxLimitMinutes: Number(row.relax_limit_minutes || 30)
+  };
+}
+
+function normalizeFocusSession(row) {
+  return {
+    id: Number(row.id),
+    clientId: row.client_id,
+    subject: row.subject,
+    anchorType: row.anchor_type,
+    anchorLabel: row.anchor_label,
+    plannedMinutes: Number(row.planned_minutes || 25),
+    plannedSeconds: Number(row.planned_minutes || 25) * 60,
+    actualMinutes: Number(row.actual_minutes || 1),
+    actualSeconds: Number(row.actual_seconds || Number(row.actual_minutes || 1) * 60),
+    note: row.note || "",
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    synced: true
+  };
+}
+
 function sanitizeAuthUser(user = {}) {
   return {
     name: String(user.name || "").trim().slice(0, 80),
@@ -1069,6 +1449,71 @@ function sanitizeTask(task = {}) {
     minutes: Math.max(1, Math.min(480, Number(task.minutes || 45))),
     done: Boolean(task.done)
   };
+}
+
+function sanitizeDeadline(deadline = {}) {
+  return {
+    id: Number(deadline.id),
+    title: String(deadline.title || "Deadline hoc tap").trim().slice(0, 160),
+    subject: String(deadline.subject || "Mon hoc").trim().slice(0, 120),
+    dueDate: sanitizeIsoDate(deadline.dueDate),
+    dueTime: sanitizeClockTime(deadline.dueTime || "20:00"),
+    scope: deadline.scope === "long" ? "long" : "short",
+    priority: ["high", "medium", "low"].includes(deadline.priority) ? deadline.priority : "medium",
+    reminderLead: Math.max(0, Math.min(10_080, Number(deadline.reminderLead || 1440))),
+    note: String(deadline.note || "").trim().slice(0, 500),
+    done: Boolean(deadline.done)
+  };
+}
+
+function sanitizeStudyRhythm(studyRhythm = {}) {
+  return {
+    preset: String(studyRhythm.preset || "deep").slice(0, 40),
+    studyMinutes: Math.max(5, Math.min(120, Number(studyRhythm.studyMinutes || 45))),
+    breakMinutes: Math.max(3, Math.min(45, Number(studyRhythm.breakMinutes || 10))),
+    reviewMinutes: Math.max(3, Math.min(30, Number(studyRhythm.reviewMinutes || 8))),
+    relaxLimitMinutes: Math.max(0, Math.min(180, Number(studyRhythm.relaxLimitMinutes || 30)))
+  };
+}
+
+function sanitizeFocusSession(session = {}) {
+  const endedAt = sanitizeDateTime(session.endedAt, new Date().toISOString());
+  const startedAt = sanitizeDateTime(session.startedAt, endedAt);
+  const plannedMinutes = Math.max(1, Math.min(1440, Number(session.plannedMinutes || Math.round(Number(session.plannedSeconds || 1500) / 60))));
+  const actualSeconds = Math.max(1, Math.min(86_400, Number(session.actualSeconds || Number(session.actualMinutes || 1) * 60)));
+
+  return {
+    clientId: String(session.clientId || session.id || Date.now()).slice(0, 120),
+    subject: String(session.subject || "Mon hoc").trim().slice(0, 120),
+    anchorType: ["goal", "task", "deadline", "custom"].includes(session.anchorType) ? session.anchorType : "goal",
+    anchorLabel: String(session.anchorLabel || "Phien hoc").trim().slice(0, 180),
+    plannedMinutes,
+    actualMinutes: Math.max(1, Math.min(1440, Number(session.actualMinutes || Math.round(actualSeconds / 60)))),
+    actualSeconds,
+    note: String(session.note || "").trim().slice(0, 1000),
+    startedAt,
+    endedAt
+  };
+}
+
+function sanitizeIsoDate(value = "") {
+  const text = String(value || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+}
+
+function sanitizeDateTime(value, fallback) {
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  return fallback;
+}
+
+function sanitizeClockTime(value = "") {
+  const text = String(value || "20:00").slice(0, 5);
+  if (!/^\d{2}:\d{2}$/.test(text)) return "20:00";
+
+  const [hours, minutes] = text.split(":").map(Number);
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return "20:00";
+  return text;
 }
 
 function sanitizeMistake(mistake = {}) {
