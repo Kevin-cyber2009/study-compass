@@ -215,7 +215,11 @@ app.post("/api/users/:userId/focus-sessions", async (request, response) => {
 
   try {
     const session = await saveFocusSession(userId, sanitizeFocusSession(request.body?.session));
-    response.status(201).json({ session });
+    const [studyStats, leaderboard] = await Promise.all([
+      getUserStudyStats(userId),
+      listStudyLeaderboard(userId)
+    ]);
+    response.status(201).json({ session, studyStats, leaderboard });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot save focus session." });
   }
@@ -265,6 +269,20 @@ app.get("/api/social", async (request, response) => {
     response.json({ posts, groups });
   } catch (error) {
     response.status(500).json({ error: error.message || "Cannot load social data." });
+  }
+});
+
+app.get("/api/leaderboard", async (request, response) => {
+  if (!pool) return response.status(503).json({ error: "DATABASE_URL is not set." });
+
+  const userId = Number(request.query.userId || 0);
+
+  try {
+    response.json({
+      leaderboard: await listStudyLeaderboard(Number.isFinite(userId) && userId > 0 ? userId : null)
+    });
+  } catch (error) {
+    response.status(500).json({ error: error.message || "Cannot load leaderboard." });
   }
 });
 
@@ -905,14 +923,22 @@ async function getStudyState(userId) {
     ),
     pool.query("select proof_count from app_users where id = $1", [userId])
   ]);
+  const proofCount = Number(userResult.rows[0]?.proof_count || 0);
+  const focusSessions = focusSessionsResult.rows.map(normalizeFocusSession);
+  const [studyStats, leaderboard] = await Promise.all([
+    getUserStudyStats(userId),
+    listStudyLeaderboard(userId)
+  ]);
 
   return {
     goal: goalResult.rows[0] ? normalizeGoal(goalResult.rows[0]) : null,
     tasks: tasksResult.rows.map(normalizeTask),
     deadlines: deadlinesResult.rows.map(normalizeDeadline),
     studyRhythm: rhythmResult.rows[0] ? normalizeStudyRhythm(rhythmResult.rows[0]) : null,
-    focusSessions: focusSessionsResult.rows.map(normalizeFocusSession),
-    proofs: Number(userResult.rows[0]?.proof_count || 0)
+    focusSessions,
+    studyStats,
+    leaderboard,
+    proofs: proofCount
   };
 }
 
@@ -1167,6 +1193,190 @@ async function saveFocusSession(userId, session, client = pool) {
   );
 
   return normalizeFocusSession(result.rows[0]);
+}
+
+async function getUserStudyStats(userId) {
+  const result = await pool.query(
+    `select
+       coalesce(sum(actual_minutes), 0)::int as total_minutes,
+       count(*)::int as session_count,
+       coalesce(
+         array_agg(distinct to_char(ended_at at time zone 'Asia/Bangkok', 'YYYY-MM-DD'))
+           filter (where ended_at is not null),
+         '{}'
+       ) as study_dates
+     from focus_sessions
+     where user_id = $1`,
+    [userId]
+  );
+  const user = await pool.query("select proof_count from app_users where id = $1", [userId]);
+  const row = result.rows[0] || {};
+
+  return makeStudyStats({
+    totalMinutes: Number(row.total_minutes || 0),
+    sessionCount: Number(row.session_count || 0),
+    studyDates: row.study_dates || [],
+    proofCount: Number(user.rows[0]?.proof_count || 0)
+  });
+}
+
+async function listStudyLeaderboard(currentUserId = null) {
+  const result = await pool.query(
+    `select
+       u.id,
+       u.display_name,
+       u.avatar,
+       u.proof_count,
+       coalesce(sum(fs.actual_minutes), 0)::int as total_minutes,
+       count(fs.id)::int as session_count,
+       coalesce(
+         array_agg(distinct to_char(fs.ended_at at time zone 'Asia/Bangkok', 'YYYY-MM-DD'))
+           filter (where fs.id is not null),
+         '{}'
+       ) as study_dates
+     from app_users u
+     left join focus_sessions fs on fs.user_id = u.id
+     group by u.id
+     limit 200`
+  );
+
+  return result.rows
+    .map((row) => {
+      const stats = makeStudyStats({
+        totalMinutes: Number(row.total_minutes || 0),
+        sessionCount: Number(row.session_count || 0),
+        studyDates: row.study_dates || [],
+        proofCount: Number(row.proof_count || 0)
+      });
+
+      return {
+        userId: Number(row.id),
+        name: row.display_name,
+        avatar: row.avatar || "",
+        totalMinutes: stats.totalMinutes,
+        sessionCount: stats.sessionCount,
+        streakDays: stats.streak.days,
+        rankTitle: stats.rank.title,
+        points: stats.rank.points,
+        isCurrentUser: currentUserId ? Number(row.id) === Number(currentUserId) : false
+      };
+    })
+    .sort((left, right) => right.points - left.points || right.totalMinutes - left.totalMinutes || left.name.localeCompare(right.name))
+    .map((item, index) => ({ ...item, position: index + 1 }))
+    .slice(0, 50);
+}
+
+function makeStudyStats({ totalMinutes = 0, sessionCount = 0, studyDates = [], proofCount = 0 }) {
+  const safeTotalMinutes = Math.max(0, Math.round(Number(totalMinutes || 0)));
+  const safeSessionCount = Math.max(0, Math.round(Number(sessionCount || 0)));
+  const safeProofCount = Math.max(0, Math.round(Number(proofCount || 0)));
+  const streak = calculateStudyStreak(studyDates);
+  const points = safeTotalMinutes + safeSessionCount * 12 + streak.days * 30 + safeProofCount * 20;
+  const rank = getRankInfo(points);
+
+  return {
+    totalMinutes: safeTotalMinutes,
+    sessionCount: safeSessionCount,
+    proofCount: safeProofCount,
+    streak,
+    rank
+  };
+}
+
+function calculateStudyStreak(values = []) {
+  const studyDays = new Set(
+    values
+      .map(toStudyDateKey)
+      .filter(Boolean)
+  );
+
+  if (!studyDays.size) {
+    return {
+      days: 0,
+      title: "Chưa có streak",
+      progress: 0,
+      next: "hoàn thành 1 phiên Focus để bắt đầu"
+    };
+  }
+
+  const today = new Date();
+  const todayKey = toStudyDateKey(today);
+  const yesterday = addDays(today, -1);
+  let cursor = studyDays.has(todayKey) ? today : yesterday;
+
+  if (!studyDays.has(toStudyDateKey(cursor))) {
+    return {
+      days: 0,
+      title: "Streak tạm nghỉ",
+      progress: 0,
+      next: "học một phiên hôm nay để nối lại"
+    };
+  }
+
+  let days = 0;
+  while (studyDays.has(toStudyDateKey(cursor))) {
+    days += 1;
+    cursor = addDays(cursor, -1);
+  }
+
+  const tiers = [
+    { min: 30, title: "Legend Streak", nextAt: 45 },
+    { min: 14, title: "Diamond Streak", nextAt: 30 },
+    { min: 7, title: "Gold Streak", nextAt: 14 },
+    { min: 3, title: "Silver Streak", nextAt: 7 },
+    { min: 1, title: "Bronze Streak", nextAt: 3 }
+  ];
+  const tier = tiers.find((item) => days >= item.min) || tiers[tiers.length - 1];
+
+  return {
+    days,
+    title: tier.title,
+    progress: Math.min(100, Math.round((days / tier.nextAt) * 100)),
+    next: days >= 45 ? "đang ở đỉnh bảng" : `còn ${Math.max(1, tier.nextAt - days)} ngày để lên hạng`
+  };
+}
+
+function getRankInfo(points) {
+  const safePoints = Math.max(0, Math.round(Number(points || 0)));
+  const tiers = [
+    { min: 0, title: "Tân binh", nextAt: 300 },
+    { min: 300, title: "Bronze Scholar", nextAt: 900 },
+    { min: 900, title: "Silver Scholar", nextAt: 1800 },
+    { min: 1800, title: "Gold Scholar", nextAt: 3600 },
+    { min: 3600, title: "Platinum Scholar", nextAt: 7200 },
+    { min: 7200, title: "Diamond Scholar", nextAt: 12000 },
+    { min: 12000, title: "Legend Scholar", nextAt: 12000 }
+  ];
+  const tier = [...tiers].reverse().find((item) => safePoints >= item.min) || tiers[0];
+  const nextTier = tiers.find((item) => item.min > safePoints);
+  const span = Math.max(1, (nextTier?.min || tier.nextAt) - tier.min);
+
+  return {
+    title: tier.title,
+    points: safePoints,
+    progress: nextTier ? Math.min(100, Math.round(((safePoints - tier.min) / span) * 100)) : 100,
+    next: nextTier ? `còn ${nextTier.min - safePoints} điểm tới ${nextTier.title}` : "đang ở rank cao nhất"
+  };
+}
+
+function toStudyDateKey(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(parsed);
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.year}-${lookup.month}-${lookup.day}`;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
 }
 
 async function seedDatabase() {

@@ -186,6 +186,7 @@ function App() {
   const [posts, setPosts] = useState(() => load("posts", seedPosts));
   const [timelapses, setTimelapses] = useState(() => load("timelapses", []));
   const [studyGroups, setStudyGroups] = useState(() => load("studyGroups", groups));
+  const [leaderboard, setLeaderboard] = useState(() => load("leaderboard", []));
   const [mistakes, setMistakes] = useState(() => load("mistakes", []));
   const [aiStatus, setAiStatus] = useState("idle");
   const [aiError, setAiError] = useState("");
@@ -253,6 +254,7 @@ function App() {
   useEffect(() => save("posts", posts), [posts]);
   useEffect(() => save("timelapses", timelapses), [timelapses]);
   useEffect(() => save("studyGroups", studyGroups), [studyGroups]);
+  useEffect(() => save("leaderboard", leaderboard), [leaderboard]);
   useEffect(() => save("mistakes", mistakes), [mistakes]);
   useEffect(() => () => {
     webReminderTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -289,6 +291,7 @@ function App() {
         if (Array.isArray(data.focusSessions)) {
           setFocusSessions((current) => mergeFocusSessionState(data.focusSessions, current));
         }
+        if (Array.isArray(data.leaderboard)) setLeaderboard(data.leaderboard);
         if (typeof data.proofs === "number") setProofs(data.proofs);
 
         lastSyncedGoal.current = JSON.stringify(data.goal || goal);
@@ -452,6 +455,7 @@ function App() {
             body: JSON.stringify({ session })
           });
           if (data.session) savedSessions.push(data.session);
+          if (Array.isArray(data.leaderboard)) setLeaderboard(data.leaderboard);
         } catch {
           failed = true;
         }
@@ -963,9 +967,17 @@ function App() {
     () => buildRhythmPlan({ tasks, deadlines, studyRhythm, apps: deviceApps }),
     [tasks, deadlines, studyRhythm, deviceApps]
   );
-  const doneCount = tasks.filter((task) => task.done).length;
-  const totalStudy = tasks.reduce((sum, task) => sum + (task.done ? task.minutes : 0), 0);
-  const streak = calculateStreak(doneCount, totalStudy);
+  const studyStats = useMemo(() => {
+    const stats = calculateStudyStats({ focusSessions, proofs });
+    const currentRank = findCurrentLeaderboardEntry(leaderboard, authUser, serverUserId);
+    return currentRank
+      ? { ...stats, rank: { ...stats.rank, globalRank: currentRank.position } }
+      : stats;
+  }, [authUser, focusSessions, leaderboard, proofs, serverUserId]);
+  const doneCount = studyStats.sessionCount;
+  const totalStudy = studyStats.totalMinutes;
+  const streak = studyStats.streak;
+  const rank = studyStats.rank;
 
   const generateAiPlan = async () => {
     setAiStatus("loading");
@@ -1104,6 +1116,7 @@ function App() {
       if (Array.isArray(data.state?.focusSessions)) {
         setFocusSessions((current) => mergeFocusSessionState(data.state.focusSessions, current));
       }
+      if (Array.isArray(data.state?.leaderboard)) setLeaderboard(data.state.leaderboard);
       if (typeof data.state?.proofs === "number") setProofs(data.state.proofs);
 
       lastSyncedGoal.current = JSON.stringify(data.state?.goal || goal);
@@ -1219,6 +1232,7 @@ function App() {
             doneCount={doneCount}
             totalStudy={totalStudy}
             streak={streak}
+            rank={rank}
             plan={plan}
             rhythmPlan={rhythmPlan}
             setActive={navigateTo}
@@ -1305,6 +1319,8 @@ function App() {
             totalStudy={totalStudy}
             doneCount={doneCount}
             streak={streak}
+            rank={rank}
+            leaderboard={leaderboard}
             posts={posts}
             mistakes={mistakes}
             timelapses={timelapses}
@@ -1347,7 +1363,7 @@ function App() {
   );
 }
 
-function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStudy, streak, plan, rhythmPlan, setActive }) {
+function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStudy, streak, rank, plan, rhythmPlan, setActive }) {
   return (
     <section className="dashboard-grid">
       <Metric icon={Target} label="Mục tiêu chính" value={goal.subject} note={goal.target} />
@@ -1360,7 +1376,8 @@ function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStud
           <i style={{ width: `${streak.progress}%` }} />
         </div>
       </article>
-      <Metric icon={Clock3} label="Giờ học đã xác nhận" value={`${Math.round(totalStudy / 60)}h`} note={`${doneCount}/${tasks.length} phiên hoàn thành`} />
+      <Metric icon={Clock3} label="Giờ Focus đã chốt" value={`${Math.round(totalStudy / 60)}h`} note={`${doneCount} phiên học thật đã lưu`} />
+      <Metric icon={Medal} label="Rank học tập" value={rank.title} note={`${rank.points} điểm${rank.globalRank ? ` · #${rank.globalRank} hệ thống` : ""}`} />
       <Metric icon={AlarmClock} label="Deadline gần" value={deadlineStats.label} note={deadlineStats.note} />
 
       <div className="panel wide">
@@ -2499,8 +2516,9 @@ function Timelapse({ user, clips, setClips, posts, setPosts, setActive }) {
   );
 }
 
-function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes, timelapses }) {
+function Profile({ user, proofs, totalStudy, doneCount, streak, rank, leaderboard, posts, mistakes, timelapses }) {
   const badges = makeProfileBadges({ proofs, totalStudy, doneCount, streak, posts, mistakes, timelapses, user });
+  const topLearners = leaderboard.slice(0, 6);
 
   return (
     <section className="profile-layout">
@@ -2509,12 +2527,35 @@ function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes,
         <div>
           <p className="eyebrow">Hồ sơ học tập</p>
           <h2>{user.name}</h2>
-          <p>{user.email} · {streak.title} · trưng bày huy hiệu để giữ động lực học.</p>
+          <p>{user.email} · {rank.title} · {streak.title}</p>
         </div>
       </div>
       <Metric icon={Trophy} label="Thành tích" value={`${proofs} minh chứng`} note="Ảnh, timelapse hoặc ghi chú học" />
       <Metric icon={BarChart3} label="Kỷ luật" value={`${doneCount} phiên`} note={`${totalStudy} phút học đã ghi nhận`} />
       <Metric icon={Flame} label="Uy tín" value={streak.title} note={`${streak.days} ngày streak · ${streak.next}`} />
+      <Metric icon={Medal} label="Rank" value={rank.title} note={`${rank.points} điểm · ${rank.next}`} />
+      <div className="panel leaderboard-panel">
+        <div className="panel-title">
+          <Trophy size={20} />
+          <h2>Bảng xếp hạng học thật</h2>
+        </div>
+        {topLearners.length === 0 && (
+          <p className="empty-state">Đăng nhập server và chốt Focus để xuất hiện trên bảng xếp hạng.</p>
+        )}
+        <div className="leaderboard-list">
+          {topLearners.map((learner) => (
+            <article className={`leaderboard-row ${learner.isCurrentUser ? "current" : ""}`} key={learner.userId || learner.name}>
+              <span>#{learner.position}</span>
+              <UserAvatar user={{ name: learner.name, avatar: learner.avatar }} />
+              <div>
+                <strong>{learner.name}</strong>
+                <p>{learner.rankTitle} · {learner.streakDays} ngày streak · {formatUsageMinutes(learner.totalMinutes)}</p>
+              </div>
+              <b>{learner.points}</b>
+            </article>
+          ))}
+        </div>
+      </div>
       <div className="panel badge-showcase">
         <div className="panel-title">
           <Award size={20} />
@@ -2538,44 +2579,182 @@ function Profile({ user, proofs, totalStudy, doneCount, streak, posts, mistakes,
 }
 
 function TutorialOverlay({ onSkip, onDone }) {
+  const tutorialTabs = [
+    {
+      key: "dashboard",
+      icon: LayoutDashboard,
+      title: "Tổng quan",
+      intro: "Nơi xem nhanh tình hình học hôm nay, tiến độ mục tiêu, deadline gần nhất và nhịp học app đang gợi ý.",
+      details: [
+        "Xem việc chưa xong, tổng thời gian đã học, streak và rank hiện tại.",
+        "Bấm Mở lịch học để đi thẳng tới danh sách phiên học cần làm.",
+        "Bấm Đổi mục tiêu học khi muốn chỉnh môn, trình độ hoặc deadline chính."
+      ],
+      tip: "Nên mở tab này đầu tiên mỗi ngày để biết việc quan trọng nhất cần làm."
+    },
+    {
+      key: "planner",
+      icon: Sparkles,
+      title: "AI",
+      intro: "Tab AI dùng để nhập mục tiêu, tạo lộ trình bằng Gemini, hỏi gia sư AI và phân tích lỗi sai.",
+      details: [
+        "Nhập môn học, mục tiêu, ngày kiểm tra, trình độ và số giờ học mỗi ngày.",
+        "Bấm Tạo bằng Gemini để app gợi ý lộ trình và lịch học hôm nay.",
+        "Dùng Gia sư AI để hỏi bài; dùng Nhật ký lỗi sai để biến lỗi sai thành việc ôn lại."
+      ],
+      tip: "Sau khi có lịch hôm nay từ AI, bấm Đưa vào lịch học để chuyển sang tab Lịch."
+    },
+    {
+      key: "schedule",
+      icon: CalendarDays,
+      title: "Lịch",
+      intro: "Tab Lịch là nơi quản lý các phiên học, deadline ngắn hạn/dài hạn và nhắc nhở.",
+      details: [
+        "Thêm, sửa, xóa phiên học; tick Xong khi hoàn thành để tăng tiến độ.",
+        "Thêm deadline để app biết mốc quan trọng và tạo phiên học bám sát hạn.",
+        "Bấm biểu tượng chuông để đặt thông báo nhắc từng phiên hoặc toàn bộ lịch sắp tới."
+      ],
+      tip: "Nên chia lịch thành phiên nhỏ 25-60 phút để dễ bắt đầu và dễ hoàn thành."
+    },
+    {
+      key: "focus",
+      icon: Clock3,
+      title: "Tập trung",
+      intro: "Tab Tập trung dùng để chạy bộ đếm giờ học, ghi phiên học thật và xem app nào đang làm lệch mục tiêu.",
+      details: [
+        "Chọn mục tiêu, task hoặc deadline làm điểm neo cho phiên học.",
+        "Chọn số phút, bấm bắt đầu, rồi bấm Hoàn thành phiên khi học xong.",
+        "Trên Android, cấp quyền Usage Access để app đọc thời gian dùng app thật trong 24 giờ gần nhất."
+      ],
+      tip: "Hoàn thành phiên Focus là dữ liệu chính để tính streak, tổng giờ học và rank."
+    },
+    {
+      key: "timelapse",
+      icon: Video,
+      title: "Quay",
+      intro: "Tab Quay dùng để lưu video/timelapse học tập làm minh chứng.",
+      details: [
+        "Nhập tên phiên và số phút học.",
+        "Chọn hoặc quay video ngắn từ camera điện thoại.",
+        "Đăng video lên Feed để lưu minh chứng và tăng độ tin cậy hồ sơ."
+      ],
+      tip: "Video ngắn, rõ bàn học hoặc bài đang làm là đủ; không cần quay quá dài."
+    },
+    {
+      key: "profile",
+      icon: Medal,
+      title: "Hồ sơ",
+      intro: "Tab Hồ sơ gom thành tích cá nhân: minh chứng, streak, rank, huy hiệu và bảng xếp hạng.",
+      details: [
+        "Xem tổng minh chứng, số giờ học, phiên đã hoàn thành và cấp rank.",
+        "Theo dõi huy hiệu đã mở khóa từ lỗi sai, timelapse, bình luận hỗ trợ hoặc chuỗi học.",
+        "Xem vị trí của mình trong leaderboard khi dùng tài khoản/server."
+      ],
+      tip: "Hồ sơ sẽ đẹp hơn khi dữ liệu đến từ phiên Focus và minh chứng thật."
+    },
+    {
+      key: "social",
+      icon: UsersRound,
+      title: "Feed",
+      intro: "Tab Feed là không gian học chung: đăng tiến độ, hỏi bài, bình luận và tham gia nhóm học.",
+      details: [
+        "Đăng bài kèm ảnh/video minh chứng, điểm số, câu hỏi hoặc ghi chú học tập.",
+        "Bình luận để hỏi thêm hoặc giúp bạn khác giải bài.",
+        "Tạo nhóm học, vào nhóm phù hợp và theo dõi chuỗi học của nhóm."
+      ],
+      tip: "Dùng Feed để tạo trách nhiệm học tập, không nên biến nó thành nơi lướt quá lâu."
+    },
+    {
+      key: "settings",
+      icon: SettingsIcon,
+      title: "Cài đặt",
+      intro: "Tab Cài đặt dùng để chỉnh tên, avatar và giao diện sáng/tối.",
+      details: [
+        "Đổi tên hiển thị và avatar để hồ sơ/feed dễ nhận ra hơn.",
+        "Chọn giao diện sáng hoặc tối theo môi trường học.",
+        "Nếu dùng tài khoản server, thông tin hồ sơ sẽ được đồng bộ lên backend."
+      ],
+      tip: "Sau khi đổi avatar hoặc tên, quay lại Feed/Hồ sơ để kiểm tra hiển thị."
+    }
+  ];
+  const [activeGuide, setActiveGuide] = useState(0);
+  const currentGuide = tutorialTabs[activeGuide];
+  const CurrentIcon = currentGuide.icon;
+  const isFirstGuide = activeGuide === 0;
+  const isLastGuide = activeGuide === tutorialTabs.length - 1;
+
   return (
     <div className="tutorial-backdrop" role="dialog" aria-modal="true" aria-label="Hướng dẫn sử dụng Study Compass">
       <section className="tutorial-card">
         <div className="panel-title spread">
           <div>
             <GraduationCap size={20} />
-            <h2>Bắt đầu với Study Compass</h2>
+            <h2>Hướng dẫn sử dụng app</h2>
           </div>
           <button className="icon-button" type="button" onClick={onSkip} title="Bỏ qua hướng dẫn">
             <X size={18} />
           </button>
         </div>
-        <div className="tutorial-steps">
-          <article>
-            <Sparkles size={19} />
+        <div className="tutorial-progress" aria-label={`Bước ${activeGuide + 1} trên ${tutorialTabs.length}`}>
+          {tutorialTabs.map((item, index) => {
+            const Icon = item.icon;
+            return (
+              <button
+                className={index === activeGuide ? "active" : ""}
+                key={item.key}
+                type="button"
+                onClick={() => setActiveGuide(index)}
+                title={`Xem hướng dẫn tab ${item.title}`}
+              >
+                <Icon size={15} />
+                <span>{item.title}</span>
+              </button>
+            );
+          })}
+        </div>
+        <article className="tutorial-detail">
+          <div className="tutorial-detail-header">
+            <span><CurrentIcon size={22} /></span>
             <div>
-              <strong>1. Nhập mục tiêu ở tab AI</strong>
-              <p>Gemini sẽ gợi ý lộ trình, lịch hôm nay và cách sửa lỗi sai.</p>
+              <p>Bước {activeGuide + 1}/{tutorialTabs.length}</p>
+              <h3>{currentGuide.title}</h3>
             </div>
-          </article>
-          <article>
-            <CalendarDays size={19} />
-            <div>
-              <strong>2. Đưa việc cần học vào Lịch</strong>
-              <p>Sửa trực tiếp từng phiên, bật chuông để app nhắc đúng giờ.</p>
-            </div>
-          </article>
-          <article>
-            <Clock3 size={19} />
-            <div>
-              <strong>3. Học tập trung và lưu minh chứng</strong>
-              <p>Dùng Pomodoro, timelapse và Feed để giữ chuỗi học thật.</p>
-            </div>
-          </article>
+          </div>
+          <p className="tutorial-intro">{currentGuide.intro}</p>
+          <div className="tutorial-howto">
+            <strong>Cách dùng</strong>
+            <ul>
+              {currentGuide.details.map((detail) => (
+                <li key={detail}>{detail}</li>
+              ))}
+            </ul>
+          </div>
+          <div className="tutorial-tip">
+            <BellRing size={17} />
+            <p>{currentGuide.tip}</p>
+          </div>
+        </article>
+        <div className="tutorial-step-actions">
+          <button
+            className="text-action"
+            type="button"
+            onClick={() => setActiveGuide((value) => Math.max(0, value - 1))}
+            disabled={isFirstGuide}
+          >
+            Quay lại
+          </button>
+          <button
+            className="text-action"
+            type="button"
+            onClick={() => setActiveGuide((value) => Math.min(tutorialTabs.length - 1, value + 1))}
+            disabled={isLastGuide}
+          >
+            Tiếp theo
+          </button>
         </div>
         <div className="tutorial-actions">
-          <button className="text-action" type="button" onClick={onSkip}>Skip</button>
-          <button className="primary-action" type="button" onClick={onDone}>Bắt đầu học</button>
+          <button className="text-action" type="button" onClick={onSkip}>Để sau</button>
+          <button className="primary-action" type="button" onClick={onDone}>Đã hiểu, bắt đầu học</button>
         </div>
       </section>
     </div>
@@ -3627,8 +3806,52 @@ function formatReminderTime(date) {
   });
 }
 
-function calculateStreak(doneCount, totalStudy) {
-  const days = Math.max(1, doneCount + Math.floor(totalStudy / 180));
+function calculateStudyStats({ focusSessions = [], proofs = 0 }) {
+  const completedSessions = focusSessions.filter((session) => session?.endedAt);
+  const totalMinutes = completedSessions.reduce((sum, session) => sum + Number(session.actualMinutes || 0), 0);
+  const streak = calculateStudyStreak(completedSessions.map((session) => session.endedAt || session.startedAt));
+  const points = Math.max(0, Math.round(totalMinutes)) + completedSessions.length * 12 + streak.days * 30 + Number(proofs || 0) * 20;
+
+  return {
+    totalMinutes: Math.max(0, Math.round(totalMinutes)),
+    sessionCount: completedSessions.length,
+    streak,
+    rank: getRankInfo(points)
+  };
+}
+
+function calculateStudyStreak(values = []) {
+  const studyDays = new Set(values.map(toStudyDateKey).filter(Boolean));
+
+  if (!studyDays.size) {
+    return {
+      days: 0,
+      title: "Chưa có streak",
+      progress: 0,
+      next: "hoàn thành 1 phiên Focus để bắt đầu"
+    };
+  }
+
+  const today = new Date();
+  const todayKey = toStudyDateKey(today);
+  const yesterday = addDateDays(today, -1);
+  let cursor = studyDays.has(todayKey) ? today : yesterday;
+
+  if (!studyDays.has(toStudyDateKey(cursor))) {
+    return {
+      days: 0,
+      title: "Streak tạm nghỉ",
+      progress: 0,
+      next: "học một phiên hôm nay để nối lại"
+    };
+  }
+
+  let days = 0;
+  while (studyDays.has(toStudyDateKey(cursor))) {
+    days += 1;
+    cursor = addDateDays(cursor, -1);
+  }
+
   const tiers = [
     { min: 30, title: "Legend Streak", nextAt: 45 },
     { min: 14, title: "Diamond Streak", nextAt: 30 },
@@ -3645,6 +3868,56 @@ function calculateStreak(doneCount, totalStudy) {
     progress,
     next: days >= 45 ? "đang ở đỉnh bảng" : `còn ${Math.max(1, tier.nextAt - days)} ngày để lên hạng`
   };
+}
+
+function getRankInfo(points) {
+  const safePoints = Math.max(0, Math.round(Number(points || 0)));
+  const tiers = [
+    { min: 0, title: "Tân binh" },
+    { min: 300, title: "Bronze Scholar" },
+    { min: 900, title: "Silver Scholar" },
+    { min: 1800, title: "Gold Scholar" },
+    { min: 3600, title: "Platinum Scholar" },
+    { min: 7200, title: "Diamond Scholar" },
+    { min: 12000, title: "Legend Scholar" }
+  ];
+  const tier = [...tiers].reverse().find((item) => safePoints >= item.min) || tiers[0];
+  const nextTier = tiers.find((item) => item.min > safePoints);
+  const span = Math.max(1, (nextTier?.min || tier.min + 1) - tier.min);
+
+  return {
+    title: tier.title,
+    points: safePoints,
+    progress: nextTier ? Math.min(100, Math.round(((safePoints - tier.min) / span) * 100)) : 100,
+    next: nextTier ? `còn ${nextTier.min - safePoints} điểm tới ${nextTier.title}` : "đang ở rank cao nhất"
+  };
+}
+
+function findCurrentLeaderboardEntry(leaderboard = [], user, serverUserId) {
+  if (!Array.isArray(leaderboard) || !leaderboard.length) return null;
+  return leaderboard.find((item) => Number(item.userId) === Number(serverUserId)) ||
+    leaderboard.find((item) => item.name === user?.name) ||
+    null;
+}
+
+function toStudyDateKey(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Bangkok",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(parsed);
+  const lookup = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${lookup.year}-${lookup.month}-${lookup.day}`;
+}
+
+function addDateDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
 }
 
 function screenTitle(active) {

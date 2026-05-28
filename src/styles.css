@@ -1227,6 +1227,54 @@ h2 {
   font-size: 0.84rem;
 }
 
+.leaderboard-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.leaderboard-list {
+  display: grid;
+  gap: 8px;
+}
+
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 42px 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid #edf1e9;
+  border-radius: 8px;
+  background: #fbfcf8;
+}
+
+.leaderboard-row.current {
+  border-color: #a9d36f;
+  background: #f0f8e4;
+}
+
+.leaderboard-row > span {
+  min-height: 32px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #174c72;
+  background: #dcebf4;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.leaderboard-row p {
+  margin: 3px 0 0;
+  color: #66736e;
+  font-size: 0.84rem;
+}
+
+.leaderboard-row b {
+  color: #8b4d25;
+  font-size: 0.86rem;
+}
+
 .timelapse-recorder,
 .timelapse-form {
   display: grid;
@@ -1665,7 +1713,8 @@ h2 {
 }
 
 .tutorial-card {
-  width: min(100%, 402px);
+  width: min(100%, 420px);
+  max-height: min(760px, calc(100vh - 32px));
   padding: 16px;
   border: 1px solid #dfe5d9;
   border-radius: 8px;
@@ -1673,36 +1722,141 @@ h2 {
   gap: 14px;
   background: #ffffff;
   box-shadow: 0 18px 50px rgba(10, 15, 13, 0.28);
+  overflow: auto;
 }
 
-.tutorial-steps {
+.tutorial-progress {
   display: grid;
-  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
 }
 
-.tutorial-steps article {
-  padding: 12px;
+.tutorial-progress button {
+  min-width: 0;
+  min-height: 50px;
+  border: 1px solid #dfe5d9;
+  border-radius: 8px;
+  padding: 7px 5px;
+  display: grid;
+  place-items: center;
+  gap: 3px;
+  color: #66736e;
+  background: #fbfcf8;
+  font-size: 0.67rem;
+  font-weight: 900;
+}
+
+.tutorial-progress button.active {
+  border-color: #2f6c80;
+  color: #174c72;
+  background: #dcebf4;
+}
+
+.tutorial-progress span {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tutorial-detail {
+  padding: 14px;
   border: 1px solid #edf1e9;
   border-radius: 8px;
-  display: flex;
-  gap: 10px;
+  display: grid;
+  gap: 12px;
   background: #fbfcf8;
 }
 
-.tutorial-steps svg {
+.tutorial-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tutorial-detail-header > span {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  background: #2f6c80;
+  flex: 0 0 auto;
+}
+
+.tutorial-detail-header p {
+  margin: 0 0 2px;
+  color: #66736e;
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.tutorial-detail-header h3,
+.tutorial-intro,
+.tutorial-tip p {
+  margin: 0;
+}
+
+.tutorial-detail-header h3 {
+  color: #17211d;
+  font-size: 1.12rem;
+}
+
+.tutorial-intro {
+  color: #25302b;
+  font-weight: 780;
+  line-height: 1.45;
+}
+
+.tutorial-howto {
+  display: grid;
+  gap: 8px;
+}
+
+.tutorial-howto strong {
+  color: #17211d;
+}
+
+.tutorial-howto ul {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 7px;
+  color: #4f5e58;
+  font-weight: 760;
+  line-height: 1.42;
+}
+
+.tutorial-tip {
+  padding: 10px;
+  border-radius: 8px;
+  display: flex;
+  gap: 9px;
+  color: #174c72;
+  background: #dcebf4;
+  font-weight: 850;
+}
+
+.tutorial-tip svg {
   color: #2f6c80;
   flex: 0 0 auto;
 }
 
-.tutorial-steps p {
-  margin: 4px 0 0;
-  color: #66736e;
-  font-weight: 760;
+.tutorial-step-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tutorial-step-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .tutorial-actions {
   display: grid;
-  grid-template-columns: 92px 1fr;
+  grid-template-columns: 92px minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -1796,6 +1950,7 @@ h2 {
 .theme-dark .rhythm-mini-row p,
 .theme-dark .active-session p,
 .theme-dark .session-row p,
+.theme-dark .leaderboard-row p,
 .theme-dark .focus-session-select,
 .theme-dark .group-row p,
 .theme-dark .post-header p,
@@ -1803,7 +1958,9 @@ h2 {
 .theme-dark .plan-step p,
 .theme-dark .timeline-item p,
 .theme-dark .settings-panel label,
-.theme-dark .tutorial-steps p {
+.theme-dark .tutorial-intro,
+.theme-dark .tutorial-howto ul,
+.theme-dark .tutorial-detail-header p {
   color: #b5c2bb;
 }
 
@@ -1853,13 +2010,15 @@ h2 {
 .theme-dark .rhythm-mini-row,
 .theme-dark .active-session,
 .theme-dark .session-row,
+.theme-dark .leaderboard-row,
 .theme-dark .usage-row,
 .theme-dark .group-row,
 .theme-dark .clip-card,
 .theme-dark .badge-card,
 .theme-dark .proof-card,
 .theme-dark .analysis-grid div,
-.theme-dark .tutorial-steps article,
+.theme-dark .tutorial-detail,
+.theme-dark .tutorial-progress button,
 .theme-dark .image-picker,
 .theme-dark .theme-switch,
 .theme-dark .api-status {
@@ -1868,13 +2027,31 @@ h2 {
   background: #111b17;
 }
 
+.theme-dark .tutorial-detail-header h3,
+.theme-dark .tutorial-howto strong {
+  color: #eef6f0;
+}
+
+.theme-dark .tutorial-progress button.active,
+.theme-dark .tutorial-tip {
+  border-color: #31513e;
+  color: #eff8ef;
+  background: #26382f;
+}
+
 .theme-dark .deadline-summary span,
 .theme-dark .deadline-card header span,
 .theme-dark .rhythm-plan article > span,
 .theme-dark .rhythm-mini-row > span,
-.theme-dark .session-row > span {
+.theme-dark .session-row > span,
+.theme-dark .leaderboard-row > span {
   color: #dcebf4;
   background: #26382f;
+}
+
+.theme-dark .leaderboard-row.current {
+  border-color: #31513e;
+  background: #16231d;
 }
 
 .theme-dark .deadline-tags i,
