@@ -22,6 +22,7 @@ import {
   MessageCircle,
   MessageSquarePlus,
   Moon,
+  MoreHorizontal,
   Pause,
   Play,
   Plus,
@@ -503,7 +504,7 @@ function App() {
         setApiHealth({
           status: response.ok ? "online" : "error",
           message: response.ok
-            ? `Server AI online: ${data.model || "Gemini"}`
+            ? `Server AI online: ${data.model || "AI"}`
             : `Server tra loi ${response.status}`
         });
       } catch {
@@ -1010,7 +1011,7 @@ function App() {
       day: "Hôm nay",
       block: item.time || "20:00",
       title: item.title || "Phiên học AI",
-      mode: "Gemini đề xuất",
+      mode: "AI đề xuất",
       minutes: Number(item.minutes || 45),
       done: false
     }));
@@ -1219,7 +1220,7 @@ function App() {
 
       <main className="content">
         <header className="topbar">
-          <p className="eyebrow">Hôm nay</p>
+          <p className="eyebrow">{screenEyebrow(active)}</p>
           <h1>{screenTitle(active)}</h1>
         </header>
 
@@ -1249,16 +1250,22 @@ function App() {
             onGenerate={generateAiPlan}
             onImportToday={importAiToday}
             onClearAi={() => setAiPlan(null)}
-            tutorMessages={tutorMessages}
-            tutorStatus={tutorStatus}
-            tutorError={tutorError}
-            onAskTutor={askTutor}
-            onClearTutor={() => setTutorMessages([])}
             mistakes={mistakes}
             mistakeStatus={mistakeStatus}
             mistakeError={mistakeError}
             onAnalyzeMistake={analyzeMistake}
             onImportMistakeTask={importMistakeTask}
+            apiHealth={apiHealth}
+            apiBaseUrl={apiBaseUrl}
+          />
+        )}
+        {active === "tutor" && (
+          <Tutor
+            tutorMessages={tutorMessages}
+            tutorStatus={tutorStatus}
+            tutorError={tutorError}
+            onAskTutor={askTutor}
+            onClearTutor={() => setTutorMessages([])}
             apiHealth={apiHealth}
             apiBaseUrl={apiBaseUrl}
           />
@@ -1300,6 +1307,16 @@ function App() {
             onScheduleRhythmReminders={scheduleRhythmReminders}
             onRefreshUsage={refreshUsageStats}
             onOpenUsageSettings={openUsageSettings}
+            setActive={navigateTo}
+          />
+        )}
+        {active === "more" && (
+          <MorePanel
+            user={authUser}
+            proofs={proofs}
+            totalStudy={totalStudy}
+            timelapses={timelapses}
+            setActive={navigateTo}
           />
         )}
         {active === "timelapse" && (
@@ -1350,43 +1367,117 @@ function App() {
       {showTutorial && <TutorialOverlay onSkip={finishTutorial} onDone={finishTutorial} />}
 
       <nav className="bottom-nav" aria-label="Thanh điều hướng chính">
-        <NavButton icon={LayoutDashboard} label="Tổng quan" active={active === "dashboard"} onClick={() => navigateTo("dashboard")} />
+        <NavButton icon={LayoutDashboard} label="Hôm nay" active={active === "dashboard"} onClick={() => navigateTo("dashboard")} />
         <NavButton icon={Sparkles} label="AI" active={active === "planner"} onClick={() => navigateTo("planner")} />
+        <NavButton icon={MessageSquarePlus} label="Gia sư" active={active === "tutor"} onClick={() => navigateTo("tutor")} />
         <NavButton icon={CalendarDays} label="Lịch" active={active === "schedule"} onClick={() => navigateTo("schedule")} />
-        <NavButton icon={Clock3} label="Tập trung" active={active === "focus"} onClick={() => navigateTo("focus")} />
-        <NavButton icon={Video} label="Quay" active={active === "timelapse"} onClick={() => navigateTo("timelapse")} />
-        <NavButton icon={Medal} label="Hồ sơ" active={active === "profile"} onClick={() => navigateTo("profile")} />
+        <NavButton icon={Clock3} label="Focus" active={active === "focus"} onClick={() => navigateTo("focus")} />
         <NavButton icon={UsersRound} label="Feed" active={active === "social"} onClick={() => navigateTo("social")} />
-        <NavButton icon={SettingsIcon} label="Cài đặt" active={active === "settings"} onClick={() => navigateTo("settings")} />
+        <NavButton
+          icon={MoreHorizontal}
+          label="Thêm"
+          active={["more", "timelapse", "profile", "settings"].includes(active)}
+          onClick={() => navigateTo("more")}
+        />
       </nav>
     </div>
   );
 }
 
 function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStudy, streak, rank, plan, rhythmPlan, setActive }) {
+  const openTasks = tasks.filter((task) => !task.done);
+  const todayTasks = pickTodayTasks(tasks);
+  const nextTask = todayTasks[0] || openTasks[0] || null;
+  const nextDeadline = deadlines.find((deadline) => !deadline.done);
+  const taskDoneCount = tasks.filter((task) => task.done).length;
+  const taskProgress = tasks.length ? Math.round((taskDoneCount / tasks.length) * 100) : 0;
+  const focusHours = Math.round(totalStudy / 60);
+  const nextTitle = nextTask?.title || "Tạo lịch học hôm nay";
+  const nextMeta = nextTask
+    ? `${nextTask.block} · ${nextTask.minutes} phút · ${nextTask.mode}`
+    : "Chưa có phiên học cụ thể. Hãy để AI tạo lịch hoặc thêm một phiên trong Lịch.";
+  const todayReason = buildTodayReason({ goal, nextTask, nextDeadline });
+
   return (
-    <section className="dashboard-grid">
-      <Metric icon={Target} label="Mục tiêu chính" value={goal.subject} note={goal.target} />
-      <article className="metric streak-metric">
-        <Flame size={24} />
-        <span>Chuỗi học</span>
-        <strong>{streak.days} ngày</strong>
-        <p>{streak.title} · {streak.next}</p>
-        <div className="streak-track">
-          <i style={{ width: `${streak.progress}%` }} />
+    <section className="today-layout">
+      <article className="today-hero">
+        <div className="today-hero-top">
+          <span>{goal.subject}</span>
+          <span>{deadlineStats.label}</span>
+        </div>
+        <p className="eyebrow">Việc nên học ngay</p>
+        <h2>{nextTitle}</h2>
+        <p>{nextMeta}</p>
+        <div className="today-reason">
+          <Sparkles size={18} />
+          <div>
+            <strong>Vì sao nên làm việc này</strong>
+            <p>{todayReason}</p>
+          </div>
+        </div>
+        <div className="today-actions">
+          <button className="primary-action" type="button" onClick={() => setActive("focus")}>
+            <Play size={18} />
+            Bắt đầu Focus
+          </button>
+          <button className="text-action" type="button" onClick={() => setActive(nextTask ? "schedule" : "planner")}>
+            {nextTask ? "Sửa lịch" : "Tạo bằng AI"}
+          </button>
         </div>
       </article>
-      <Metric icon={Clock3} label="Giờ Focus đã chốt" value={`${Math.round(totalStudy / 60)}h`} note={`${doneCount} phiên học thật đã lưu`} />
-      <Metric icon={Medal} label="Rank học tập" value={rank.title} note={`${rank.points} điểm${rank.globalRank ? ` · #${rank.globalRank} hệ thống` : ""}`} />
-      <Metric icon={AlarmClock} label="Deadline gần" value={deadlineStats.label} note={deadlineStats.note} />
+
+      <div className="today-stats">
+        <Metric icon={CheckCircle2} label="Lịch hôm nay" value={`${taskProgress}%`} note={`${taskDoneCount}/${tasks.length || 0} việc đã tick`} />
+        <Metric icon={Flame} label="Chuỗi học" value={`${streak.days} ngày`} note={`${streak.title} · ${streak.next}`} />
+        <Metric icon={Clock3} label="Focus đã chốt" value={`${focusHours}h`} note={`${doneCount} phiên học thật đã lưu`} />
+      </div>
+
+      <div className="panel today-list-panel">
+        <div className="panel-title">
+          <CalendarDays size={20} />
+          <h2>Tiếp theo trong lịch</h2>
+        </div>
+        {todayTasks.length === 0 && (
+          <p className="empty-state">Chưa có việc mở. Tạo lịch bằng AI hoặc thêm một phiên học mới.</p>
+        )}
+        {todayTasks.slice(0, 4).map((task) => (
+          <div className="deadline-row" key={`${task.day}-${task.title}`}>
+            <span>{task.block}</span>
+            <div>
+              <strong>{task.title}</strong>
+              <p>{task.day} · {task.minutes} phút</p>
+            </div>
+          </div>
+        ))}
+        <button className="text-action" type="button" onClick={() => setActive("schedule")}>Mở lịch học</button>
+      </div>
+
+      <div className="panel today-list-panel">
+        <div className="panel-title">
+          <AlarmClock size={20} />
+          <h2>Mốc gần nhất</h2>
+        </div>
+        {nextDeadline ? (
+          <div className="deadline-row">
+            <span>{deadlineDaysLeft(nextDeadline)}</span>
+            <div>
+              <strong>{nextDeadline.title}</strong>
+              <p>{nextDeadline.subject} · {formatDeadlineDue(nextDeadline)}</p>
+            </div>
+          </div>
+        ) : (
+          <p className="empty-state">Chưa có deadline đang mở.</p>
+        )}
+        <button className="text-action" type="button" onClick={() => setActive("schedule")}>Quản lý deadline</button>
+      </div>
 
       <div className="panel wide">
         <div className="panel-title">
           <BookOpenCheck size={20} />
-          <h2>Lộ trình AI đề xuất</h2>
+          <h2>Lộ trình rút gọn</h2>
         </div>
-        <div className="timeline">
-          {plan.map((item, index) => (
+        <div className="timeline compact-timeline">
+          {plan.slice(0, 3).map((item, index) => (
             <div className="timeline-item" key={item.title}>
               <span>{index + 1}</span>
               <div>
@@ -1396,33 +1487,23 @@ function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStud
             </div>
           ))}
         </div>
+        <button className="text-action" type="button" onClick={() => setActive("planner")}>Mở AI lập lộ trình</button>
       </div>
 
       <div className="panel">
         <div className="panel-title">
-          <AlarmClock size={20} />
-          <h2>Deadline gần</h2>
-        </div>
-        {tasks.slice(0, 3).map((task) => (
-          <div className="deadline-row" key={`${task.day}-${task.title}`}>
-            <span>{task.block}</span>
-            <div>
-              <strong>{task.title}</strong>
-              <p>{task.day} · {task.minutes} phút</p>
-            </div>
-          </div>
-        ))}
-        <button className="text-action" onClick={() => setActive("schedule")}>Mở lịch học</button>
-        <button className="text-action subtle-action" onClick={() => setActive("planner")}>Đổi mục tiêu học</button>
-      </div>
-
-      <div className="panel">
-        <div className="panel-title">
-          <BellRing size={20} />
-          <h2>Nhịp học hôm nay</h2>
+          <Medal size={20} />
+          <h2>Động lực</h2>
         </div>
         <div className="rhythm-mini-list">
-          {rhythmPlan.blocks.slice(0, 3).map((block) => (
+          <div className="rhythm-mini-row">
+            <span>{rank.points}</span>
+            <div>
+              <strong>{rank.title}</strong>
+              <p>{rank.next}{rank.globalRank ? ` · #${rank.globalRank} hệ thống` : ""}</p>
+            </div>
+          </div>
+          {rhythmPlan.blocks.slice(0, 2).map((block) => (
             <div className="rhythm-mini-row" key={block.label}>
               <span>{block.minutes}p</span>
               <div>
@@ -1433,6 +1514,50 @@ function Dashboard({ goal, tasks, deadlines, deadlineStats, doneCount, totalStud
           ))}
         </div>
       </div>
+    </section>
+  );
+}
+
+function MorePanel({ user, proofs, totalStudy, timelapses, setActive }) {
+  const moreItems = [
+    {
+      tab: "profile",
+      icon: Medal,
+      title: "Hồ sơ",
+      value: `${proofs} minh chứng`,
+      note: `${Math.round(totalStudy / 60)}h học đã ghi nhận`
+    },
+    {
+      tab: "timelapse",
+      icon: Video,
+      title: "Quay",
+      value: `${timelapses.length} video`,
+      note: "Lưu minh chứng học tập"
+    },
+    {
+      tab: "settings",
+      icon: SettingsIcon,
+      title: "Cài đặt",
+      value: user.name,
+      note: "Tài khoản và giao diện"
+    }
+  ];
+
+  return (
+    <section className="more-layout">
+      {moreItems.map((item) => {
+        const Icon = item.icon;
+        return (
+          <button className="more-card" type="button" key={item.tab} onClick={() => setActive(item.tab)}>
+            <Icon size={22} />
+            <div>
+              <strong>{item.title}</strong>
+              <span>{item.value}</span>
+              <p>{item.note}</p>
+            </div>
+          </button>
+        );
+      })}
     </section>
   );
 }
@@ -1518,11 +1643,6 @@ function Planner({
   onGenerate,
   onImportToday,
   onClearAi,
-  tutorMessages,
-  tutorStatus,
-  tutorError,
-  onAskTutor,
-  onClearTutor,
   mistakes,
   mistakeStatus,
   mistakeError,
@@ -1538,18 +1658,10 @@ function Planner({
     selfReason: "Chưa hiểu bản chất"
   });
 
-  const [tutorDraft, setTutorDraft] = useState("");
-
   const submitMistake = () => {
     if (!mistakeDraft.problem.trim()) return;
     onAnalyzeMistake(mistakeDraft);
     setMistakeDraft({ ...mistakeDraft, problem: "", wrongAnswer: "" });
-  };
-
-  const submitTutor = () => {
-    if (!tutorDraft.trim()) return;
-    onAskTutor(tutorDraft);
-    setTutorDraft("");
   };
 
   return (
@@ -1589,7 +1701,7 @@ function Planner({
         </label>
         <button className="primary-action" type="button" onClick={onGenerate} disabled={aiStatus === "loading"}>
           <Sparkles size={18} />
-          {aiStatus === "loading" ? "AI đang lập lịch" : "Tạo bằng Gemini"}
+          {aiStatus === "loading" ? "AI đang lập lịch" : "Tạo bằng AI"}
         </button>
         {aiError && <p className="inline-error">{aiError}</p>}
       </form>
@@ -1598,7 +1710,7 @@ function Planner({
         <div className="panel-title spread">
           <div>
             <Target size={20} />
-            <h2>{aiPlan ? "Kế hoạch Gemini" : "Kế hoạch tự động"}</h2>
+            <h2>{aiPlan ? "Kế hoạch AI" : "Kế hoạch tự động"}</h2>
           </div>
           {aiPlan && (
             <button className="icon-button" onClick={onClearAi} title="Xóa kế hoạch AI">
@@ -1628,41 +1740,6 @@ function Planner({
           </div>
         )}
         {aiPlan?.warning && <p className="ai-warning">{aiPlan.warning}</p>}
-      </div>
-
-      <div className="panel tutor-panel">
-        <div className="panel-title spread">
-          <div>
-            <MessageSquarePlus size={20} />
-            <h2>Gia sư AI</h2>
-          </div>
-          <button className="icon-button" type="button" onClick={onClearTutor} title="Xóa hội thoại">
-            <RefreshCw size={18} />
-          </button>
-        </div>
-        <div className="tutor-chat">
-          {tutorMessages.length === 0 && (
-            <p className="empty-state">Gửi câu hỏi, bài tập hoặc phần đang kẹt để gia sư AI gợi ý từng bước.</p>
-          )}
-          {tutorMessages.map((message, index) => (
-            <article className={`tutor-message ${message.role}`} key={`${message.role}-${index}`}>
-              <span>{message.role === "assistant" ? "Gia sư" : "Bạn"}</span>
-              <p>{message.content}</p>
-            </article>
-          ))}
-        </div>
-        <div className="tutor-form">
-          <textarea
-            value={tutorDraft}
-            onChange={(event) => setTutorDraft(event.target.value)}
-            placeholder="Nhập câu hỏi hoặc dán đề bài..."
-          />
-          <button className="primary-action" type="button" onClick={submitTutor} disabled={tutorStatus === "loading"}>
-            <Send size={18} />
-            {tutorStatus === "loading" ? "Đang hỏi" : "Hỏi gia sư"}
-          </button>
-          {tutorError && <p className="inline-error">{tutorError}</p>}
-        </div>
       </div>
 
       <div className="panel mistake-panel">
@@ -1749,6 +1826,67 @@ function Planner({
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+function Tutor({
+  tutorMessages,
+  tutorStatus,
+  tutorError,
+  onAskTutor,
+  onClearTutor,
+  apiHealth,
+  apiBaseUrl
+}) {
+  const [tutorDraft, setTutorDraft] = useState("");
+
+  const submitTutor = () => {
+    if (!tutorDraft.trim()) return;
+    onAskTutor(tutorDraft);
+    setTutorDraft("");
+  };
+
+  return (
+    <section className="tutor-layout">
+      <div className="panel tutor-panel">
+        <div className={`api-status ${apiHealth.status}`}>
+          <span>{apiHealth.message}</span>
+          <code>{apiBaseUrl || "/api"}</code>
+        </div>
+        <div className="panel-title spread">
+          <div>
+            <MessageSquarePlus size={20} />
+            <h2>Gia sư AI</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClearTutor} title="Xóa hội thoại">
+            <RefreshCw size={18} />
+          </button>
+        </div>
+        <div className="tutor-chat">
+          {tutorMessages.length === 0 && (
+            <p className="empty-state">Gửi câu hỏi, bài tập hoặc phần đang kẹt để gia sư AI gợi ý từng bước.</p>
+          )}
+          {tutorMessages.map((message, index) => (
+            <article className={`tutor-message ${message.role}`} key={`${message.role}-${index}`}>
+              <span>{message.role === "assistant" ? "Gia sư" : "Bạn"}</span>
+              <p>{message.content}</p>
+            </article>
+          ))}
+        </div>
+        <div className="tutor-form">
+          <textarea
+            value={tutorDraft}
+            onChange={(event) => setTutorDraft(event.target.value)}
+            placeholder="Nhập câu hỏi hoặc dán đề bài..."
+          />
+          <button className="primary-action" type="button" onClick={submitTutor} disabled={tutorStatus === "loading"}>
+            <Send size={18} />
+            {tutorStatus === "loading" ? "Đang hỏi" : "Hỏi gia sư"}
+          </button>
+          {tutorError && <p className="inline-error">{tutorError}</p>}
+        </div>
+      </div>
     </section>
   );
 }
@@ -2105,11 +2243,13 @@ function Focus({
   rhythmPlan,
   onScheduleRhythmReminders,
   onRefreshUsage,
-  onOpenUsageSettings
+  onOpenUsageSettings,
+  setActive
 }) {
   const [customFocusMinutes, setCustomFocusMinutes] = useState(Math.max(1, Math.round(minutes / 60)));
   const [focusAnchor, setFocusAnchor] = useState("goal");
   const [focusNote, setFocusNote] = useState("");
+  const [focusRecap, setFocusRecap] = useState(null);
   const focusAnchorOptions = useMemo(
     () => buildFocusAnchorOptions({ goal, tasks, deadlines }),
     [goal, tasks, deadlines]
@@ -2162,6 +2302,14 @@ function Focus({
     };
 
     onCompleteFocusSession(completedSession);
+    setFocusRecap(buildFocusRecap({
+      session: completedSession,
+      goal,
+      tasks,
+      deadlines,
+      apps,
+      studyRhythm
+    }));
     setFocusSession(null);
     setRunning(false);
     setFocusNote("");
@@ -2176,6 +2324,56 @@ function Focus({
 
   return (
     <section className="focus-grid">
+      {focusRecap && (
+        <article className="focus-recap">
+          <div className="panel-title spread">
+            <div>
+              <CheckCircle2 size={20} />
+              <h2>Recap phiên học</h2>
+            </div>
+            <button className="icon-button" type="button" onClick={() => setFocusRecap(null)} title="Ẩn recap">
+              <X size={18} />
+            </button>
+          </div>
+          <div className="recap-hero">
+            <span>{focusRecap.actualMinutes} phút</span>
+            <div>
+              <strong>{focusRecap.title}</strong>
+              <p>{focusRecap.summary}</p>
+            </div>
+          </div>
+          <div className="recap-grid">
+            <div>
+              <Target size={18} />
+              <strong>Bám mục tiêu</strong>
+              <p>{focusRecap.alignment}</p>
+            </div>
+            <div>
+              <CalendarDays size={18} />
+              <strong>Việc tiếp theo</strong>
+              <p>{focusRecap.nextStep}</p>
+            </div>
+            <div>
+              <Gauge size={18} />
+              <strong>Thiết bị</strong>
+              <p>{focusRecap.usage}</p>
+            </div>
+          </div>
+          <div className="recap-actions">
+            <button className="primary-action" type="button" onClick={() => setActive("schedule")}>
+              <CalendarDays size={18} />
+              Xem lịch tiếp theo
+            </button>
+            <button className="text-action" type="button" onClick={() => {
+              applyFocusMinutes(studyRhythm.studyMinutes);
+              setFocusRecap(null);
+            }}>
+              Học phiên nữa
+            </button>
+          </div>
+        </article>
+      )}
+
       <div className="panel timer-panel">
         <div className="panel-title">
           <Clock3 size={20} />
@@ -2596,13 +2794,25 @@ function TutorialOverlay({ onSkip, onDone }) {
       key: "planner",
       icon: Sparkles,
       title: "AI",
-      intro: "Tab AI dùng để nhập mục tiêu, tạo lộ trình bằng Gemini, hỏi gia sư AI và phân tích lỗi sai.",
+      intro: "Tab AI dùng để nhập mục tiêu, tạo lộ trình bằng AI và phân tích lỗi sai.",
       details: [
         "Nhập môn học, mục tiêu, ngày kiểm tra, trình độ và số giờ học mỗi ngày.",
-        "Bấm Tạo bằng Gemini để app gợi ý lộ trình và lịch học hôm nay.",
-        "Dùng Gia sư AI để hỏi bài; dùng Nhật ký lỗi sai để biến lỗi sai thành việc ôn lại."
+        "Bấm Tạo bằng AI để app gợi ý lộ trình và lịch học hôm nay.",
+        "Dùng Nhật ký lỗi sai để biến lỗi sai thành việc ôn lại."
       ],
       tip: "Sau khi có lịch hôm nay từ AI, bấm Đưa vào lịch học để chuyển sang tab Lịch."
+    },
+    {
+      key: "tutor",
+      icon: MessageSquarePlus,
+      title: "Gia sư",
+      intro: "Tab Gia sư dùng để hỏi bài, gỡ phần đang kẹt và giữ mạch hội thoại riêng với AI.",
+      details: [
+        "Gửi bài tập, câu hỏi kiến thức hoặc phần chưa hiểu.",
+        "AI trả lời theo ngữ cảnh mục tiêu học hiện tại.",
+        "Bấm biểu tượng làm mới khi muốn xóa hội thoại và bắt đầu lại."
+      ],
+      tip: "Khi câu hỏi là bài tập, nên gửi đủ đề bài và phần đã thử làm để AI bám sát hơn."
     },
     {
       key: "schedule",
@@ -3806,6 +4016,61 @@ function formatReminderTime(date) {
   });
 }
 
+function pickTodayTasks(tasks = []) {
+  const openTasks = tasks.filter((task) => !task.done);
+  const todayTasks = openTasks.filter((task) => {
+    const label = String(task.day || "").trim().toLocaleLowerCase("vi-VN");
+    return !label || label.includes("hôm nay") || label.includes("hom nay");
+  });
+
+  return (todayTasks.length ? todayTasks : openTasks).slice(0, 6);
+}
+
+function buildTodayReason({ goal, nextTask, nextDeadline }) {
+  if (nextDeadline && nextTask) {
+    return `Deadline "${nextDeadline.title}" còn ${deadlineDaysLeft(nextDeadline)}, nên ưu tiên phiên "${nextTask.title}" trước.`;
+  }
+
+  if (nextDeadline) {
+    return `Deadline gần nhất là "${nextDeadline.title}" còn ${deadlineDaysLeft(nextDeadline)}. Hãy tạo một phiên học bám mốc này.`;
+  }
+
+  if (nextTask) {
+    return `Phiên này đang nằm trong lịch mở và bám mục tiêu "${goal.target}".`;
+  }
+
+  return "Bạn chưa có việc học cụ thể cho hôm nay. Tạo lịch bằng AI để bắt đầu nhanh hơn.";
+}
+
+function buildFocusRecap({ session, goal, tasks = [], deadlines = [], apps = [], studyRhythm = defaultStudyRhythm }) {
+  const nextTask = pickTodayTasks(tasks)
+    .find((task) => task.title !== session.anchorLabel);
+  const nextDeadline = sortDeadlines(deadlines).find((deadline) => !deadline.done);
+  const distractionMinutes = apps
+    .filter((app) => isDistractingApp(app))
+    .reduce((sum, app) => sum + Number(app.minutes || 0), 0);
+  const relaxLimit = normalizeStudyRhythm(studyRhythm).relaxLimitMinutes;
+  const overRelax = Math.max(0, distractionMinutes - relaxLimit);
+  const sessionTitle = session.anchorLabel || goal.subject || "Phiên Focus";
+
+  return {
+    title: sessionTitle,
+    actualMinutes: Math.max(1, Math.round(Number(session.actualMinutes || 0))),
+    summary: `Bạn vừa chốt một phiên ${session.subject || goal.subject}. Đây là bằng chứng học thật để tăng streak, giờ học và rank.`,
+    alignment: session.anchorType === "deadline"
+      ? `Phiên này bám trực tiếp deadline "${sessionTitle}", giúp giảm học lan man trước hạn.`
+      : `Phiên này đang bám mục tiêu "${goal.target}" của ${goal.subject}.`,
+    nextStep: nextTask
+      ? `${nextTask.block} · ${nextTask.title} (${nextTask.minutes} phút).`
+      : nextDeadline
+        ? `Tạo phiên học tiếp theo cho deadline "${nextDeadline.title}" còn ${deadlineDaysLeft(nextDeadline)}.`
+        : "Chưa có việc tiếp theo. Tạo lịch bằng AI hoặc thêm một phiên trong Lịch.",
+    usage: overRelax
+      ? `App giải trí đang vượt giới hạn khoảng ${overRelax} phút. Nên nghỉ ngắn rồi quay lại lịch học.`
+      : `Giải trí đang trong ngưỡng ${relaxLimit} phút. Nhịp học hôm nay vẫn ổn.`
+  };
+}
+
 function calculateStudyStats({ focusSessions = [], proofs = 0 }) {
   const completedSessions = focusSessions.filter((session) => session?.endedAt);
   const totalMinutes = completedSessions.reduce((sum, session) => sum + Number(session.actualMinutes || 0), 0);
@@ -3922,16 +4187,23 @@ function addDateDays(date, days) {
 
 function screenTitle(active) {
   const titles = {
-    dashboard: "Bảng điều khiển học tập",
+    dashboard: "Hôm nay học gì?",
     planner: "AI lập lộ trình",
     schedule: "Lịch học cá nhân",
     focus: "Phiên tập trung",
     timelapse: "Timelapse học tập",
     profile: "Hồ sơ thành tích",
     social: "Xã hội học tập",
+    more: "Thêm",
     settings: "Cài đặt"
   };
   return titles[active];
+}
+
+function screenEyebrow(active) {
+  if (active === "dashboard") return "Bước tiếp theo";
+  if (["planner", "schedule", "focus"].includes(active)) return "Luồng học chính";
+  return "Công cụ phụ";
 }
 
 function useNativeShell(onBackButton) {
